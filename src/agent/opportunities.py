@@ -33,7 +33,7 @@ def rank_opportunities(
     *,
     bankroll_usd: float = 1_000.0,
 ) -> list[Opportunity]:
-    """Rank markets using actual forecast signals; missing evidence always passes."""
+    """Rank markets using real forecast signals; missing evidence always passes."""
     ranked: list[Opportunity] = []
     for market in markets:
         signals = signals_by_ticker.get(market.ticker, [])
@@ -61,6 +61,7 @@ def rank_opportunities(
         spread_factor = max(0.0, 1.0 - market.spread / 0.10)
         score = max(0.0, decision.edge) * decision.confidence * evidence_quality * liquidity_factor * spread_factor
         reasons = list(decision.reasons)
+        reasons.extend(decision.warnings)
         reasons.append(f"{len(signals)} independent signal(s)")
         reasons.append(f"evidence quality {evidence_quality:.0%}")
 
@@ -68,7 +69,7 @@ def rank_opportunities(
             Opportunity(
                 ticker=market.ticker,
                 title=market.title,
-                market_probability=market.yes_price,
+                market_probability=decision.market_probability,
                 model_probability=model_probability,
                 edge=decision.edge,
                 confidence=decision.confidence,
@@ -83,13 +84,14 @@ def rank_opportunities(
 
 
 def _weighted_probability(signals: list[Signal]) -> float:
-    total_weight = sum(max(0.0, signal.confidence) for signal in signals)
+    weights = [signal.weight * signal.confidence for signal in signals]
+    total_weight = sum(weights)
     if total_weight <= 0:
         return sum(signal.probability for signal in signals) / len(signals)
-    return sum(signal.probability * max(0.0, signal.confidence) for signal in signals) / total_weight
+    return sum(signal.probability * weight for signal, weight in zip(signals, weights)) / total_weight
 
 
 def _evidence_quality(signals: list[Signal]) -> float:
     confidence = sum(signal.confidence for signal in signals) / len(signals)
-    diversity = min(1.0, len({signal.source for signal in signals}) / 3.0)
+    diversity = min(1.0, len({signal.name for signal in signals}) / 3.0)
     return min(1.0, 0.75 * confidence + 0.25 * diversity)
