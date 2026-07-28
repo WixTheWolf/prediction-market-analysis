@@ -9,21 +9,27 @@ on:
     paths:
       - ".github/workflows/live-kalshi-scan.yml"
       - "src/agent/**"
+      - "dashboard/**"
       - "config/forecast_signals.json"
       - "pyproject.toml"
       - "uv.lock"
 
 permissions:
   contents: read
+  pages: write
+  id-token: write
 
 concurrency:
   group: live-kalshi-scan
   cancel-in-progress: true
 
 jobs:
-  scan:
+  scan-and-publish:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
       - name: Checkout repository
@@ -89,6 +95,8 @@ jobs:
               f"- Evidence-backed paper opportunities: **{len(actionable)}**",
               "- Mode: **read-only / no order execution**",
               "",
+              "Dashboard will be published to the GitHub Pages deployment URL shown on this run.",
+              "",
           ]
           if opportunities:
               lines.extend([
@@ -119,6 +127,16 @@ jobs:
               handle.write(summary)
           PY
 
+      - name: Build static dashboard package
+        run: |
+          rm -rf site
+          mkdir -p site/data
+          cp dashboard/index.html site/index.html
+          cp output/live/latest-scan.json site/data/latest-scan.json
+          cp output/live/opportunities.json site/data/opportunities.json
+          cp output/live/run-metadata.json site/data/run-metadata.json
+          touch site/.nojekyll
+
       - name: Upload scan results
         uses: actions/upload-artifact@v4
         with:
@@ -126,3 +144,15 @@ jobs:
           path: output/live/
           retention-days: 7
           if-no-files-found: error
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy dashboard to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
