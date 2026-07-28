@@ -1,0 +1,6 @@
+interface:
+  display_name: "Prediction Market Analysis"
+  short_description: "Repo-specific patterns and workflows for prediction-market-analysis"
+  default_prompt: "Use the prediction-market-analysis repo skill to follow existing architecture, testing, and workflow conventions."
+policy:
+  allow_implicit_invocation: true
