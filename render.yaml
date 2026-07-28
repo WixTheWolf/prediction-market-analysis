@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: prediction-market-agent
+    runtime: docker
+    plan: starter
+    autoDeploy: true
+    healthCheckPath: /health
+    envVars:
+      - key: SCAN_INTERVAL_SECONDS
+        value: "300"
+      - key: SCAN_LIMIT
+        value: "250"
+      - key: SCAN_TOP
+        value: "25"
+      - key: MIN_VOLUME
+        value: "10000"
+      - key: MAX_SPREAD
+        value: "0.08"
+      - key: SNAPSHOT_PATH
+        value: "/app/output/live/market_snapshots.jsonl"
+      - key: LOG_LEVEL
+        value: "INFO"
+    disk:
+      name: prediction-agent-data
+      mountPath: /app/output
+      sizeGB: 1
