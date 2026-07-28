@@ -1,0 +1,108 @@
+name: Live Kalshi Scan
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/15 * * * *"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/live-kalshi-scan.yml"
+      - "src/agent/**"
+      - "pyproject.toml"
+      - "uv.lock"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-kalshi-scan
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run live public-market scan
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          mkdir -p output/live
+          uv run python -m src.agent.cli \
+            --limit 250 \
+            --top 25 \
+            --min-volume 10000 \
+            --max-spread 0.08 \
+            --json > output/live/latest-scan.json
+
+      - name: Create run metadata and summary
+        run: |
+          uv run python - <<'PY'
+          import json
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          scan_path = Path("output/live/latest-scan.json")
+          markets = json.loads(scan_path.read_text(encoding="utf-8"))
+          generated_at = datetime.now(timezone.utc).isoformat()
+          metadata = {
+              "generated_at": generated_at,
+              "market_count": len(markets),
+              "source": "Kalshi public API",
+              "mode": "read-only paper research",
+          }
+          Path("output/live/run-metadata.json").write_text(
+              json.dumps(metadata, indent=2), encoding="utf-8"
+          )
+
+          lines = [
+              "## Live Kalshi scan",
+              "",
+              f"- Generated: `{generated_at}`",
+              f"- Ranked markets: **{len(markets)}**",
+              "- Mode: **read-only / no order execution**",
+              "",
+          ]
+          if markets:
+              lines.extend([
+                  "| Ticker | Yes | Spread | Volume | Market |",
+                  "|---|---:|---:|---:|---|",
+              ])
+              for market in markets[:10]:
+                  title = str(market.get("title", "")).replace("|", "\\|")[:90]
+                  yes = float(market.get("yes_price", 0.0))
+                  spread = float(market.get("spread", 0.0))
+                  volume = float(market.get("volume", 0.0))
+                  lines.append(
+                      f"| `{market.get('ticker', '')}` | {yes:.1%} | {spread:.1%} | {volume:,.0f} | {title} |"
+                  )
+          else:
+              lines.append("No markets passed the current liquidity and spread filters.")
+
+          summary = "\n".join(lines) + "\n"
+          Path("output/live/summary.md").write_text(summary, encoding="utf-8")
+          with Path(__import__("os").environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as handle:
+              handle.write(summary)
+          PY
+
+      - name: Upload scan results
+        uses: actions/upload-artifact@v4
+        with:
+          name: kalshi-scan-${{ github.run_number }}
+          path: output/live/
+          retention-days: 7
+          if-no-files-found: error
