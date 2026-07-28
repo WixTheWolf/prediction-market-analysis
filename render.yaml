@@ -20,6 +20,16 @@ services:
         value: "/app/output/live/market_snapshots.jsonl"
       - key: LOG_LEVEL
         value: "INFO"
+      - key: KALSHI_ENVIRONMENT
+        value: "demo"
+      - key: KALSHI_API_KEY_ID
+        sync: false
+      - key: KALSHI_PRIVATE_KEY_PEM
+        sync: false
+      - key: KALSHI_LIVE_WRITE_ENABLED
+        value: "false"
+      - key: KALSHI_LIVE_CONFIRMATION_TOKEN
+        sync: false
     disk:
       name: prediction-agent-data
       mountPath: /app/output
