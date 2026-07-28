@@ -19,8 +19,9 @@ from .models import MarketSnapshot
 class ScannerConfig:
     base_url: str = "https://api.elections.kalshi.com/trade-api/v2"
     timeout_seconds: float = 15.0
-    min_volume: float = 10_000.0
-    max_spread: float = 0.08
+    min_volume: float = 100.0
+    max_spread: float = 0.15
+    page_size: int = 1_000
 
 
 class KalshiScanner:
@@ -59,11 +60,26 @@ class KalshiScanner:
         return payload
 
     def scan(self, limit: int = 100, status: str = "open") -> list[MarketSnapshot]:
-        payload = self.fetch_markets(limit=limit, status=status)
-        raw_markets = payload.get("markets", [])
-        if not isinstance(raw_markets, list):
-            raise ValueError("Kalshi response field 'markets' must be a list")
-        markets = [normalize_market(item) for item in raw_markets if isinstance(item, Mapping)]
+        """Fetch up to ``limit`` markets across cursor-paginated responses."""
+        if limit <= 0:
+            return []
+
+        raw_markets: list[Mapping[str, Any]] = []
+        cursor: Optional[str] = None
+        while len(raw_markets) < limit:
+            remaining = limit - len(raw_markets)
+            page_limit = min(self.config.page_size, remaining)
+            payload = self.fetch_markets(limit=page_limit, status=status, cursor=cursor)
+            page = payload.get("markets", [])
+            if not isinstance(page, list):
+                raise ValueError("Kalshi response field 'markets' must be a list")
+            raw_markets.extend(item for item in page if isinstance(item, Mapping))
+            cursor_value = payload.get("cursor")
+            cursor = str(cursor_value) if cursor_value else None
+            if not cursor or not page:
+                break
+
+        markets = [normalize_market(item) for item in raw_markets[:limit]]
         return [
             market
             for market in markets
@@ -72,27 +88,30 @@ class KalshiScanner:
 
 
 def normalize_market(raw: Mapping[str, Any]) -> MarketSnapshot:
-    """Normalize a Kalshi market payload into the agent's common model."""
+    """Normalize current dollar/fixed-point fields with legacy fallbacks."""
 
-    yes_bid = _price(raw.get("yes_bid"))
-    yes_ask = _price(raw.get("yes_ask"))
-    no_bid = _price(raw.get("no_bid"))
-    no_ask = _price(raw.get("no_ask"))
+    yes_bid = _first_price(raw, "yes_bid_dollars", "yes_bid")
+    yes_ask = _first_price(raw, "yes_ask_dollars", "yes_ask")
+    no_bid = _first_price(raw, "no_bid_dollars", "no_bid")
+    no_ask = _first_price(raw, "no_ask_dollars", "no_ask")
 
-    yes_price = yes_ask if yes_ask is not None else _price(raw.get("last_price"), default=0.5)
+    last_price = _first_price(raw, "last_price_dollars", "last_price", default=0.5)
+    yes_price = yes_ask if yes_ask is not None else last_price
     no_price = no_ask if no_ask is not None else round(1.0 - yes_price, 4)
     spread = _spread(yes_bid, yes_ask, no_bid, no_ask)
 
     return MarketSnapshot(
         ticker=str(raw.get("ticker") or raw.get("market_ticker") or "unknown"),
-        title=str(raw.get("title") or raw.get("subtitle") or "Untitled market"),
+        title=str(raw.get("title") or raw.get("yes_sub_title") or raw.get("subtitle") or "Untitled market"),
         yes_price=yes_price,
         no_price=no_price,
-        volume=float(raw.get("volume") or raw.get("volume_24h") or 0.0),
-        open_interest=float(raw.get("open_interest") or 0.0),
+        volume=_first_number(raw, "volume_fp", "volume", "volume_24h_fp", "volume_24h"),
+        open_interest=_first_number(raw, "open_interest_fp", "open_interest"),
         spread=spread,
-        closes_at=_parse_datetime(raw.get("close_time") or raw.get("expected_expiration_time")),
-        category=str(raw.get("category") or raw.get("series_ticker") or "unknown"),
+        closes_at=_parse_datetime(
+            raw.get("close_time") or raw.get("latest_expiration_time") or raw.get("expected_expiration_time")
+        ),
+        category=str(raw.get("category") or raw.get("series_ticker") or raw.get("event_ticker") or "unknown"),
         rules_text=str(raw.get("rules_primary") or raw.get("rules") or ""),
     )
 
@@ -101,6 +120,21 @@ def rank_markets(markets: Iterable[MarketSnapshot]) -> list[MarketSnapshot]:
     """Rank liquid, tight-spread markets first for downstream research."""
 
     return sorted(markets, key=lambda market: (market.spread, -market.volume, -market.open_interest))
+
+
+def _first_price(raw: Mapping[str, Any], *keys: str, default: Optional[float] = None) -> Optional[float]:
+    for key in keys:
+        if raw.get(key) is not None:
+            return _price(raw[key], default=default)
+    return default
+
+
+def _first_number(raw: Mapping[str, Any], *keys: str) -> float:
+    for key in keys:
+        value = raw.get(key)
+        if value not in (None, ""):
+            return float(value)
+    return 0.0
 
 
 def _price(value: Any, default: Optional[float] = None) -> Optional[float]:
