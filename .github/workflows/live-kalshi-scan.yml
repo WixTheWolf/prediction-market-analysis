@@ -9,6 +9,7 @@ on:
     paths:
       - ".github/workflows/live-kalshi-scan.yml"
       - "src/agent/**"
+      - "config/forecast_signals.json"
       - "pyproject.toml"
       - "uv.lock"
 
@@ -49,6 +50,15 @@ jobs:
             --max-spread 0.08 \
             --json > output/live/latest-scan.json
 
+      - name: Build evidence-first opportunity report
+        run: |
+          uv run python -m src.agent.opportunity_cli \
+            --markets output/live/latest-scan.json \
+            --signals config/forecast_signals.json \
+            --output output/live/opportunities.json \
+            --bankroll 1000 \
+            --top 25
+
       - name: Create run metadata and summary
         run: |
           uv run python - <<'PY'
@@ -56,12 +66,14 @@ jobs:
           from datetime import datetime, timezone
           from pathlib import Path
 
-          scan_path = Path("output/live/latest-scan.json")
-          markets = json.loads(scan_path.read_text(encoding="utf-8"))
+          markets = json.loads(Path("output/live/latest-scan.json").read_text(encoding="utf-8"))
+          opportunities = json.loads(Path("output/live/opportunities.json").read_text(encoding="utf-8"))
           generated_at = datetime.now(timezone.utc).isoformat()
+          actionable = [item for item in opportunities if item.get("action") != "PASS"]
           metadata = {
               "generated_at": generated_at,
               "market_count": len(markets),
+              "opportunity_count": len(actionable),
               "source": "Kalshi public API",
               "mode": "read-only paper research",
           }
@@ -74,24 +86,32 @@ jobs:
               "",
               f"- Generated: `{generated_at}`",
               f"- Ranked markets: **{len(markets)}**",
+              f"- Evidence-backed paper opportunities: **{len(actionable)}**",
               "- Mode: **read-only / no order execution**",
               "",
           ]
-          if markets:
+          if opportunities:
               lines.extend([
-                  "| Ticker | Yes | Spread | Volume | Market |",
-                  "|---|---:|---:|---:|---|",
+                  "| Action | Ticker | Market | Model | Edge | Confidence | Max loss |",
+                  "|---|---|---:|---:|---:|---:|---:|",
               ])
-              for market in markets[:10]:
-                  title = str(market.get("title", "")).replace("|", "\\|")[:90]
-                  yes = float(market.get("yes_price", 0.0))
-                  spread = float(market.get("spread", 0.0))
-                  volume = float(market.get("volume", 0.0))
+              for item in opportunities[:10]:
+                  model = item.get("model_probability")
+                  model_text = "—" if model is None else f"{float(model):.1%}"
                   lines.append(
-                      f"| `{market.get('ticker', '')}` | {yes:.1%} | {spread:.1%} | {volume:,.0f} | {title} |"
+                      f"| {item.get('action', 'PASS')} | `{item.get('ticker', '')}` | "
+                      f"{float(item.get('market_probability', 0.0)):.1%} | {model_text} | "
+                      f"{float(item.get('edge', 0.0)):.1%} | {float(item.get('confidence', 0.0)):.1%} | "
+                      f"${float(item.get('maximum_loss_usd', 0.0)):,.2f} |"
                   )
           else:
-              lines.append("No markets passed the current liquidity and spread filters.")
+              lines.append("No markets passed the current filters.")
+
+          if not actionable:
+              lines.extend([
+                  "",
+                  "> No trade recommendations were issued because no independent forecast signals are registered. This is intentional fail-closed behavior.",
+              ])
 
           summary = "\n".join(lines) + "\n"
           Path("output/live/summary.md").write_text(summary, encoding="utf-8")
