@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="theme-color" content="#0a0b10" />
+  <title>Prediction Market Command Center</title>
+  <style>
+    :root{--bg:#08090d;--panel:#11131a;--panel2:#171a23;--text:#f4f6fb;--muted:#9ca3b5;--line:#292d3a;--good:#3ddc97;--warn:#ffcf5a;--bad:#ff6b7a;--accent:#8f7cff}
+    *{box-sizing:border-box} body{margin:0;background:radial-gradient(circle at 20% 0,#18152b 0,transparent 38%),var(--bg);color:var(--text);font:15px/1.45 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    .wrap{max-width:1240px;margin:auto;padding:28px 20px 60px}.top{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;margin-bottom:24px}.eyebrow{color:var(--accent);font-weight:800;letter-spacing:.14em;text-transform:uppercase;font-size:12px}.title{font-size:clamp(30px,5vw,58px);line-height:1;margin:8px 0 10px;letter-spacing:-.04em}.sub{color:var(--muted);max-width:720px}.status{display:flex;align-items:center;gap:8px;padding:9px 12px;border:1px solid var(--line);border-radius:999px;background:#0d0f15;white-space:nowrap}.dot{width:9px;height:9px;border-radius:50%;background:var(--good);box-shadow:0 0 12px var(--good)}
+    .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:22px 0}.metric,.card{background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,.015));border:1px solid var(--line);border-radius:18px}.metric{padding:18px}.metric small{display:block;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:700}.metric strong{font-size:28px;display:block;margin-top:5px}.toolbar{display:flex;gap:10px;flex-wrap:wrap;margin:18px 0}.btn,select,input{background:var(--panel);border:1px solid var(--line);color:var(--text);border-radius:11px;padding:10px 12px}.btn{cursor:pointer;font-weight:700}.btn:hover{border-color:var(--accent)}input{min-width:260px}.grid{display:grid;gap:12px}.card{padding:18px;display:grid;grid-template-columns:minmax(0,1.6fr) repeat(5,minmax(80px,.55fr));gap:16px;align-items:center}.ticker{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--accent);font-size:12px}.market-title{font-size:17px;font-weight:750;margin-top:4px}.label{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em}.value{font-weight:800;font-size:17px;margin-top:3px}.action{display:inline-flex;width:max-content;border-radius:999px;padding:6px 10px;font-size:12px;font-weight:900;letter-spacing:.04em}.PAPER_BUY,.BUY{background:rgba(61,220,151,.14);color:var(--good);border:1px solid rgba(61,220,151,.4)}.PASS{background:rgba(156,163,181,.12);color:#c5cad5;border:1px solid var(--line)}.edge-positive{color:var(--good)}.empty{padding:38px;text-align:center;color:var(--muted)}.foot{margin-top:28px;color:var(--muted);font-size:12px}.foot a{color:#c9c1ff}.reasons{grid-column:1/-1;border-top:1px solid var(--line);padding-top:11px;color:var(--muted);font-size:13px}.hidden{display:none}
+    @media(max-width:900px){.metrics{grid-template-columns:repeat(2,1fr)}.card{grid-template-columns:1fr 1fr}.market{grid-column:1/-1}.top{flex-direction:column}.status{align-self:flex-start}}
+    @media(max-width:520px){.metrics{grid-template-columns:1fr 1fr}.metric strong{font-size:22px}.card{grid-template-columns:1fr}.market{grid-column:auto}input{min-width:100%;width:100%}}
+  </style>
+</head>
+<body>
+<main class="wrap">
+  <div class="top">
+    <div><div class="eyebrow">WYX Prediction Engine</div><h1 class="title">Market Command Center</h1><div class="sub">Live Kalshi discovery, evidence-backed probabilities, edge ranking, and conservative paper-position sizing. No real-money orders are placed from this dashboard.</div></div>
+    <div class="status"><span class="dot"></span><span id="statusText">Loading latest scan…</span></div>
+  </div>
+
+  <section class="metrics">
+    <div class="metric"><small>Markets scanned</small><strong id="marketCount">—</strong></div>
+    <div class="metric"><small>Actionable</small><strong id="actionableCount">—</strong></div>
+    <div class="metric"><small>Best edge</small><strong id="bestEdge">—</strong></div>
+    <div class="metric"><small>Last update</small><strong id="lastUpdate" style="font-size:18px">—</strong></div>
+  </section>
+
+  <div class="toolbar">
+    <input id="search" placeholder="Search ticker or market…" />
+    <select id="filter"><option value="all">All markets</option><option value="actionable">Actionable only</option><option value="pass">Passes only</option></select>
+    <button class="btn" id="refresh">Refresh</button>
+  </div>
+
+  <section id="cards" class="grid"><div class="card empty">Loading opportunity data…</div></section>
+  <div class="foot">Data refreshes every 15 minutes through GitHub Actions. Recommendations require independent evidence and fail closed to PASS when evidence is missing. This is research software, not financial advice.</div>
+</main>
+<script>
+const fmtPct=v=>v==null?'—':`${(Number(v)*100).toFixed(1)}%`;
+const fmtUsd=v=>new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(Number(v||0));
+let rows=[];
+async function load(){
+  const stamp=Date.now();
+  const [oppRes,metaRes,marketRes]=await Promise.all([
+    fetch(`data/opportunities.json?t=${stamp}`),fetch(`data/run-metadata.json?t=${stamp}`),fetch(`data/latest-scan.json?t=${stamp}`)
+  ]);
+  if(!oppRes.ok) throw new Error('Opportunity data is not available yet.');
+  rows=await oppRes.json();
+  const meta=metaRes.ok?await metaRes.json():{};
+  const markets=marketRes.ok?await marketRes.json():[];
+  document.getElementById('marketCount').textContent=meta.market_count??markets.length??0;
+  const actionable=rows.filter(x=>x.action!=='PASS');
+  document.getElementById('actionableCount').textContent=actionable.length;
+  document.getElementById('bestEdge').textContent=fmtPct(Math.max(0,...rows.map(x=>Number(x.edge||0))));
+  const updated=meta.generated_at?new Date(meta.generated_at):null;
+  document.getElementById('lastUpdate').textContent=updated?updated.toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):'Unknown';
+  document.getElementById('statusText').textContent='Live scanner healthy';
+  render();
+}
+function render(){
+  const q=document.getElementById('search').value.toLowerCase().trim();
+  const f=document.getElementById('filter').value;
+  const filtered=rows.filter(x=>{
+    const match=!q||`${x.ticker} ${x.title}`.toLowerCase().includes(q);
+    const action=f==='all'||(f==='actionable'&&x.action!=='PASS')||(f==='pass'&&x.action==='PASS');
+    return match&&action;
+  });
+  const root=document.getElementById('cards');
+  if(!filtered.length){root.innerHTML='<div class="card empty">No markets match this view. When no independent signals are registered, the engine intentionally returns PASS.</div>';return;}
+  root.innerHTML=filtered.map(x=>`<article class="card">
+    <div class="market"><div class="ticker">${esc(x.ticker||'')}</div><div class="market-title">${esc(x.title||'Untitled market')}</div></div>
+    <div><div class="label">Action</div><div class="value"><span class="action ${esc(x.action||'PASS')}">${esc(x.action||'PASS')}</span></div></div>
+    <div><div class="label">Market</div><div class="value">${fmtPct(x.market_probability)}</div></div>
+    <div><div class="label">Model</div><div class="value">${fmtPct(x.model_probability)}</div></div>
+    <div><div class="label">Edge</div><div class="value ${Number(x.edge)>0?'edge-positive':''}">${fmtPct(x.edge)}</div></div>
+    <div><div class="label">Max paper loss</div><div class="value">${fmtUsd(x.maximum_loss_usd)}</div></div>
+    <div class="reasons">Confidence ${fmtPct(x.confidence)} · ${esc((x.reasons||[]).join(' · '))}</div>
+  </article>`).join('');
+}
+function esc(s){return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));}
+document.getElementById('search').addEventListener('input',render);
+document.getElementById('filter').addEventListener('change',render);
+document.getElementById('refresh').addEventListener('click',()=>load().catch(showError));
+function showError(e){document.getElementById('statusText').textContent='Waiting for first published scan';document.getElementById('cards').innerHTML=`<div class="card empty">${esc(e.message)} The next scheduled scan will publish the dashboard data.</div>`;}
+load().catch(showError);
+</script>
+</body>
+</html>
