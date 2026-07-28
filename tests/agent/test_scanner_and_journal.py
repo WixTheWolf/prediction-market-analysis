@@ -28,6 +28,30 @@ def test_normalizes_cent_prices_and_spread() -> None:
     assert market.closes_at is not None
 
 
+def test_normalizes_current_dollar_and_fixed_point_fields() -> None:
+    market = normalize_market(
+        {
+            "ticker": "CURRENT-26",
+            "title": "Current schema market",
+            "yes_bid_dollars": "0.4200",
+            "yes_ask_dollars": "0.4500",
+            "no_bid_dollars": "0.5500",
+            "no_ask_dollars": "0.5800",
+            "last_price_dollars": "0.4400",
+            "volume_fp": "25123.50",
+            "open_interest_fp": "3010.25",
+            "latest_expiration_time": "2026-09-01T00:00:00Z",
+        }
+    )
+
+    assert market.yes_price == 0.45
+    assert market.no_price == 0.58
+    assert market.spread == 0.03
+    assert market.volume == 25_123.5
+    assert market.open_interest == 3_010.25
+    assert market.closes_at is not None
+
+
 def test_ranking_prefers_tighter_spread_then_volume() -> None:
     first = normalize_market({"ticker": "A", "yes_ask": 50, "no_ask": 51, "yes_bid": 49, "volume": 10_000})
     second = normalize_market({"ticker": "B", "yes_ask": 50, "no_ask": 54, "yes_bid": 46, "volume": 100_000})

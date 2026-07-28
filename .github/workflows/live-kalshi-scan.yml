@@ -9,8 +9,8 @@ on:
     paths:
       - ".github/workflows/live-kalshi-scan.yml"
       - "src/agent/**"
-      - "dashboard/**"
       - "config/forecast_signals.json"
+      - "dashboard/**"
       - "pyproject.toml"
       - "uv.lock"
 
@@ -24,7 +24,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  scan-and-publish:
+  scan:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:
@@ -50,11 +50,25 @@ jobs:
         run: |
           mkdir -p output/live
           uv run python -m src.agent.cli \
-            --limit 250 \
-            --top 25 \
-            --min-volume 10000 \
-            --max-spread 0.08 \
+            --limit 1000 \
+            --top 100 \
+            --min-volume 100 \
+            --max-spread 0.15 \
             --json > output/live/latest-scan.json
+
+      - name: Require visible market data
+        run: |
+          uv run python - <<'PY'
+          import json
+          from pathlib import Path
+
+          markets = json.loads(Path("output/live/latest-scan.json").read_text(encoding="utf-8"))
+          if not markets:
+              raise SystemExit(
+                  "Kalshi returned no displayable markets. Check API schema, endpoint availability, and filters."
+              )
+          print(f"Validated {len(markets)} displayable markets")
+          PY
 
       - name: Build evidence-first opportunity report
         run: |
@@ -63,7 +77,7 @@ jobs:
             --signals config/forecast_signals.json \
             --output output/live/opportunities.json \
             --bankroll 1000 \
-            --top 25
+            --top 100
 
       - name: Create run metadata and summary
         run: |
@@ -82,6 +96,7 @@ jobs:
               "opportunity_count": len(actionable),
               "source": "Kalshi public API",
               "mode": "read-only paper research",
+              "scanner_status": "healthy",
           }
           Path("output/live/run-metadata.json").write_text(
               json.dumps(metadata, indent=2), encoding="utf-8"
@@ -91,11 +106,9 @@ jobs:
               "## Live Kalshi scan",
               "",
               f"- Generated: `{generated_at}`",
-              f"- Ranked markets: **{len(markets)}**",
+              f"- Displayable markets: **{len(markets)}**",
               f"- Evidence-backed paper opportunities: **{len(actionable)}**",
               "- Mode: **read-only / no order execution**",
-              "",
-              "Dashboard will be published to the GitHub Pages deployment URL shown on this run.",
               "",
           ]
           if opportunities:
@@ -112,13 +125,11 @@ jobs:
                       f"{float(item.get('edge', 0.0)):.1%} | {float(item.get('confidence', 0.0)):.1%} | "
                       f"${float(item.get('maximum_loss_usd', 0.0)):,.2f} |"
                   )
-          else:
-              lines.append("No markets passed the current filters.")
 
           if not actionable:
               lines.extend([
                   "",
-                  "> No trade recommendations were issued because no independent forecast signals are registered. This is intentional fail-closed behavior.",
+                  "> Markets are connected and visible. No trade recommendations were issued because no independent forecast signals are registered.",
               ])
 
           summary = "\n".join(lines) + "\n"
@@ -127,16 +138,6 @@ jobs:
               handle.write(summary)
           PY
 
-      - name: Build static dashboard package
-        run: |
-          rm -rf site
-          mkdir -p site/data
-          cp dashboard/index.html site/index.html
-          cp output/live/latest-scan.json site/data/latest-scan.json
-          cp output/live/opportunities.json site/data/opportunities.json
-          cp output/live/run-metadata.json site/data/run-metadata.json
-          touch site/.nojekyll
-
       - name: Upload scan results
         uses: actions/upload-artifact@v4
         with:
@@ -144,6 +145,14 @@ jobs:
           path: output/live/
           retention-days: 7
           if-no-files-found: error
+
+      - name: Build static dashboard package
+        run: |
+          mkdir -p site/data
+          cp dashboard/index.html site/index.html
+          cp output/live/latest-scan.json site/data/latest-scan.json
+          cp output/live/opportunities.json site/data/opportunities.json
+          cp output/live/run-metadata.json site/data/run-metadata.json
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
