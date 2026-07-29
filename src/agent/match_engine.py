@@ -1,11 +1,4 @@
-"""High-recall, fail-closed matching between Kalshi and Polymarket.
-
-The first matcher only compared the first unsorted Polymarket pages against the
-Kalshi title. That produced a healthy-looking source with zero useful matches.
-This module deliberately improves *recall* while preserving strict semantic,
-number, date, negation, liquidity, and expiration checks before a signal is
-emitted.
-"""
+"""High-recall, fail-closed matching between Kalshi and Polymarket."""
 
 from __future__ import annotations
 
@@ -15,7 +8,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
-from typing import Any, Iterable, Mapping
+from typing import Iterable, Mapping
 
 import httpx
 
@@ -59,7 +52,7 @@ class NearMatch:
 
 
 class PolymarketDiscoveryClient:
-    """Load the most useful active Polymarket universe, not arbitrary first pages."""
+    """Load useful active markets instead of arbitrary first pages."""
 
     def __init__(self, config: PolymarketConfig, client: httpx.Client | None = None) -> None:
         self.config = config
@@ -81,8 +74,6 @@ class PolymarketDiscoveryClient:
         self.close()
 
     def fetch_active_markets(self) -> list[ExternalMarket]:
-        """Union high-volume, high-liquidity, and recently ending markets."""
-
         orders = ("volume", "liquidity", "endDate")
         seen: dict[str, ExternalMarket] = {}
         per_order = max(self.config.page_size, math.ceil(self.config.max_markets / len(orders)))
@@ -107,11 +98,10 @@ class PolymarketDiscoveryClient:
                 if not isinstance(payload, list):
                     raise ValueError("Polymarket markets response must be a list")
                 for row in payload:
-                    if not isinstance(row, Mapping):
-                        continue
-                    parsed = parse_polymarket_market(row)
-                    if parsed is not None:
-                        seen[parsed.market_id] = parsed
+                    if isinstance(row, Mapping):
+                        parsed = parse_polymarket_market(row)
+                        if parsed is not None:
+                            seen[parsed.market_id] = parsed
                 loaded += len(payload)
                 if len(payload) < limit:
                     break
@@ -128,8 +118,6 @@ def build_recall_signals(
     external_markets: Iterable[ExternalMarket],
     config: PolymarketConfig,
 ) -> tuple[dict[str, list[Signal]], list[CrossVenueMatch], list[NearMatch]]:
-    """Match equivalent contracts with broad retrieval and strict final gates."""
-
     candidates = [
         market for market in external_markets
         if market.liquidity_usd >= config.min_liquidity_usd
@@ -150,43 +138,38 @@ def build_recall_signals(
         for variant in variants:
             for token in _meaningful_tokens(variant):
                 candidate_ids.update(token_index.get(token, set()))
-        if not candidate_ids:
-            continue
 
-        best_match: tuple[ExternalMarket, float, str] | None = None
-        best_rejected: tuple[ExternalMarket, float, str, str] | None = None
+        accepted: tuple[ExternalMarket, float, str] | None = None
+        rejected: tuple[ExternalMarket, float, str, str] | None = None
         for index in candidate_ids:
             external = candidates[index]
-            best_variant = max(variants, key=lambda value: _similarity(value, external.question))
-            similarity = _similarity(best_variant, external.question)
-            rejection = _rejection_reason(best_variant, external.question, kalshi.closes_at, external.end_date, config)
-            if rejection:
-                if best_rejected is None or similarity > best_rejected[1]:
-                    best_rejected = (external, similarity, rejection, best_variant)
+            variant = max(variants, key=lambda value: _similarity(value, external.question))
+            similarity = _similarity(variant, external.question)
+            reason = _rejection_reason(variant, external.question, kalshi.closes_at, external.end_date, config)
+            if reason or similarity < config.min_similarity:
+                reason = reason or "similarity below threshold"
+                if rejected is None or similarity > rejected[1]:
+                    rejected = (external, similarity, reason, variant)
                 continue
-            if similarity < config.min_similarity:
-                if best_rejected is None or similarity > best_rejected[1]:
-                    best_rejected = (external, similarity, "similarity below threshold", best_variant)
-                continue
-            if best_match is None or similarity > best_match[1]:
-                best_match = (external, similarity, best_variant)
+            if accepted is None or similarity > accepted[1]:
+                accepted = (external, similarity, variant)
 
-        if best_rejected is not None and best_rejected[1] >= 0.34:
-            external, similarity, rejection, variant = best_rejected
+        if rejected is not None and rejected[1] >= 0.34:
+            external, similarity, reason, variant = rejected
             near_matches.append(
                 NearMatch(
                     kalshi_ticker=kalshi.ticker,
                     kalshi_question=variant,
                     external_question=external.question,
                     similarity=round(similarity, 6),
-                    rejection=rejection,
+                    rejection=reason,
                     source_url=external.source_url,
                 )
             )
-        if best_match is None:
+        if accepted is None:
             continue
 
-        external, similarity, matched_variant = best_match
+        external, similarity, variant = accepted
         confidence = _confidence(similarity, external, config)
         signal = Signal(
             name="Polymarket equivalent-contract price",
@@ -203,7 +186,7 @@ def build_recall_signals(
                 "source_url": external.source_url,
                 "external_market_id": external.market_id,
                 "external_question": external.question,
-                "kalshi_question_used": matched_variant,
+                "kalshi_question_used": variant,
                 "match_similarity": f"{similarity:.4f}",
                 "retrieved_at": datetime.now(timezone.utc).isoformat(),
             },
@@ -265,7 +248,8 @@ def _rejection_reason(
     config: PolymarketConfig,
 ) -> str:
     left_canonical, right_canonical = _canonical(left), _canonical(right)
-    left_numbers, right_numbers = set(_NUMBER_RE.findall(left_canonical)), set(_NUMBER_RE.findall(right_canonical))
+    left_numbers = set(_NUMBER_RE.findall(left_canonical))
+    right_numbers = set(_NUMBER_RE.findall(right_canonical))
     if left_numbers and right_numbers and left_numbers != right_numbers:
         return "different numeric terms"
     left_tokens, right_tokens = set(left_canonical.split()), set(right_canonical.split())
@@ -274,8 +258,7 @@ def _rejection_reason(
         return "different month"
     if bool(left_tokens & _NEGATIONS) != bool(right_tokens & _NEGATIONS):
         return "opposite or negated wording"
-    shared = _meaningful_tokens(left) & _meaningful_tokens(right)
-    if len(shared) < 2:
+    if len(_meaningful_tokens(left) & _meaningful_tokens(right)) < 2:
         return "fewer than two meaningful shared terms"
     if left_close is not None and right_close is not None:
         left_aware = left_close if left_close.tzinfo else left_close.replace(tzinfo=timezone.utc)
