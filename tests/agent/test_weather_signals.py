@@ -54,6 +54,7 @@ def test_weather_signal_builds_probability_and_reuses_station_request() -> None:
     assert requests == 1
     assert metadata["status"] == "healthy"
     assert metadata["signals"] == 2
+    assert metadata["matches"] == 0
     assert signals["TEMP-72"][0].probability > 0.70
     assert signals["TEMP-75"][0].probability < 0.50
     assert signals["TEMP-72"][0].confidence >= 0.66
