@@ -153,7 +153,7 @@ def _spread(*prices: Optional[float]) -> float:
         spreads.append(max(0.0, yes_ask - yes_bid))
     if no_bid is not None and no_ask is not None:
         spreads.append(max(0.0, no_ask - no_bid))
-    return min(spreads) if spreads else 0.0
+    return round(min(spreads), 4) if spreads else 0.0
 
 
 def _parse_datetime(value: Any) -> Optional[datetime]:
