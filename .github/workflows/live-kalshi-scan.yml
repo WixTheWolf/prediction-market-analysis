@@ -26,7 +26,7 @@ concurrency:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -47,22 +47,30 @@ jobs:
         run: |
           mkdir -p output/live
           uv run python -m src.agent.cli \
-            --limit 1000 \
-            --top 150 \
-            --min-volume 10 \
-            --max-spread 0.25 \
+            --limit 5000 \
+            --top 200 \
+            --min-volume 1 \
+            --max-spread 0.35 \
             --json > output/live/latest-scan.json
 
-      - name: Require curated market data
+      - name: Validate scan output without blocking deployment
         run: |
           uv run python - <<'PY'
           import json
           from pathlib import Path
 
-          markets = json.loads(Path("output/live/latest-scan.json").read_text(encoding="utf-8"))
-          if not markets:
-              raise SystemExit("No readable curated markets were produced. Check API schema and curation rules.")
-          print(f"Validated {len(markets)} curated markets")
+          path = Path("output/live/latest-scan.json")
+          try:
+              markets = json.loads(path.read_text(encoding="utf-8"))
+          except Exception as exc:
+              print(f"Scan output was invalid: {exc}")
+              markets = []
+              path.write_text("[]\n", encoding="utf-8")
+          if not isinstance(markets, list):
+              print("Scan output was not a list; replacing with an empty list")
+              markets = []
+              path.write_text("[]\n", encoding="utf-8")
+          print(f"Publishing {len(markets)} curated markets")
           PY
 
       - name: Build evidence-first opportunity report
@@ -72,12 +80,16 @@ jobs:
             --signals config/forecast_signals.json \
             --output output/live/opportunities.json \
             --bankroll 1000 \
-            --top 150
+            --top 200
 
       - name: Create run metadata and summary
+        env:
+          BUILD_SHA: ${{ github.sha }}
+          BUILD_RUN: ${{ github.run_number }}
         run: |
           uv run python - <<'PY'
           import json
+          import os
           from datetime import datetime, timezone
           from pathlib import Path
 
@@ -96,7 +108,9 @@ jobs:
               "category_count": len(categories),
               "source": "Kalshi public API",
               "mode": "read-only paper research",
-              "scanner_status": "healthy",
+              "scanner_status": "healthy" if markets else "degraded",
+              "build_sha": os.environ.get("BUILD_SHA", "")[:8],
+              "build_run": os.environ.get("BUILD_RUN", ""),
           }
           Path("output/live/run-metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
@@ -104,6 +118,7 @@ jobs:
               "## Live Kalshi scan",
               "",
               f"- Generated: `{generated_at}`",
+              f"- Build: `{metadata['build_sha']}` / run **{metadata['build_run']}**",
               f"- Curated markets: **{len(markets)}**",
               f"- Categories represented: **{len(categories)}**",
               f"- Registered evidence signals: **{metadata['evidence_signal_count']}**",
@@ -125,14 +140,13 @@ jobs:
                       f"{float(item.get('edge', 0.0)):.1%} | {float(item.get('confidence', 0.0)):.1%} | "
                       f"${float(item.get('maximum_loss_usd', 0.0)):,.2f} |"
                   )
-          if not actionable:
-              lines.extend([
-                  "",
-                  "> Live markets are connected. No trade recommendation is issued without independent evidence.",
-              ])
+          if not markets:
+              lines.extend(["", "> Dashboard deployed, but the scanner produced no curated markets. The site will show degraded status instead of remaining stale."])
+          elif not actionable:
+              lines.extend(["", "> Live markets are connected. No trade recommendation is issued without independent evidence."])
           summary = "\n".join(lines) + "\n"
           Path("output/live/summary.md").write_text(summary, encoding="utf-8")
-          with Path(__import__("os").environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as handle:
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as handle:
               handle.write(summary)
           PY
 
@@ -147,6 +161,7 @@ jobs:
       - name: Build static dashboard package
         run: |
           mkdir -p site/data
+          touch site/.nojekyll
           cp dashboard/index.html site/index.html
           cp output/live/latest-scan.json site/data/latest-scan.json
           cp output/live/opportunities.json site/data/opportunities.json
