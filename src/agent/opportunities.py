@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from math import floor, log
 from typing import Iterable
 
@@ -36,10 +36,27 @@ def rank_opportunities(
     signals_by_ticker: dict[str, list[Signal]],
     *,
     bankroll_usd: float = 1_000.0,
+    max_portfolio_fraction: float = 0.10,
+    max_actionable_plays: int = 5,
 ) -> list[Opportunity]:
-    """Rank markets using real forecast signals; missing evidence always passes."""
+    """Rank evidence-backed markets and enforce portfolio-level paper limits.
+
+    Missing evidence always produces PASS. After individual scoring, only the
+    highest-ranked contract in a correlated category can remain actionable, at
+    most ``max_actionable_plays`` can be open, and total proposed maximum loss
+    cannot exceed ``max_portfolio_fraction`` of the paper bankroll.
+    """
+    if bankroll_usd <= 0:
+        raise ValueError("bankroll_usd must be positive")
+    if not 0.0 <= max_portfolio_fraction <= 1.0:
+        raise ValueError("max_portfolio_fraction must be between 0 and 1")
+    if max_actionable_plays < 0:
+        raise ValueError("max_actionable_plays must be non-negative")
+
+    market_list = list(markets)
+    market_by_ticker = {market.ticker: market for market in market_list}
     ranked: list[Opportunity] = []
-    for market in markets:
+    for market in market_list:
         signals = signals_by_ticker.get(market.ticker, [])
         if not signals:
             ranked.append(
@@ -72,7 +89,11 @@ def rank_opportunities(
         reasons.append(f"{len(signals)} independent signal(s)")
         reasons.append(f"evidence quality {evidence_quality:.0%}")
 
-        contracts = floor(decision.maximum_loss_usd / decision.market_probability) if decision.market_probability > 0 else 0
+        contracts = (
+            floor(decision.maximum_loss_usd / decision.market_probability)
+            if decision.action != "PASS" and decision.market_probability > 0
+            else 0
+        )
         expected_value = round(contracts * max(0.0, decision.edge), 2)
         ranked.append(
             Opportunity(
@@ -93,7 +114,74 @@ def rank_opportunities(
             )
         )
 
-    return sorted(ranked, key=lambda item: (item.action != "PASS", item.score), reverse=True)
+    individually_ranked = sorted(ranked, key=lambda item: (item.action != "PASS", item.score), reverse=True)
+    constrained = _apply_portfolio_limits(
+        individually_ranked,
+        market_by_ticker,
+        bankroll_usd=bankroll_usd,
+        max_portfolio_fraction=max_portfolio_fraction,
+        max_actionable_plays=max_actionable_plays,
+    )
+    return sorted(constrained, key=lambda item: (item.action != "PASS", item.score), reverse=True)
+
+
+def _apply_portfolio_limits(
+    opportunities: list[Opportunity],
+    market_by_ticker: dict[str, MarketSnapshot],
+    *,
+    bankroll_usd: float,
+    max_portfolio_fraction: float,
+    max_actionable_plays: int,
+) -> list[Opportunity]:
+    selected_groups: set[str] = set()
+    selected_count = 0
+    selected_risk = 0.0
+    risk_limit = round(bankroll_usd * max_portfolio_fraction, 2)
+    constrained: list[Opportunity] = []
+
+    for opportunity in opportunities:
+        if opportunity.action == "PASS":
+            constrained.append(opportunity)
+            continue
+
+        market = market_by_ticker[opportunity.ticker]
+        group = _correlation_group(market)
+        if group in selected_groups:
+            constrained.append(
+                _pass_opportunity(
+                    opportunity,
+                    "Correlated market group already represented by a higher-ranked candidate.",
+                )
+            )
+            continue
+
+        proposed_risk = selected_risk + opportunity.maximum_loss_usd
+        if selected_count >= max_actionable_plays or proposed_risk > risk_limit + 0.005:
+            constrained.append(_pass_opportunity(opportunity, "Portfolio risk cap reached."))
+            continue
+
+        selected_groups.add(group)
+        selected_count += 1
+        selected_risk = proposed_risk
+        constrained.append(opportunity)
+
+    return constrained
+
+
+def _pass_opportunity(opportunity: Opportunity, reason: str) -> Opportunity:
+    return replace(
+        opportunity,
+        action="PASS",
+        contracts=0,
+        maximum_loss_usd=0.0,
+        expected_value_usd=0.0,
+        reasons=(*opportunity.reasons, reason),
+    )
+
+
+def _correlation_group(market: MarketSnapshot) -> str:
+    category = str(market.category or "").strip().lower()
+    return category or market.ticker.lower()
 
 
 def _evidence_quality(signals: list[Signal]) -> float:
