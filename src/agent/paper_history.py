@@ -36,9 +36,10 @@ def update_paper_history(
     """Append one scan, open new paper picks, and update indicative marks.
 
     An existing paper pick is closed at the current displayed price when a new
-    hard market-quality, correlation, or portfolio guard explicitly blocks it.
-    This keeps legacy paper exposure aligned with the current risk policy while
-    preserving the realized paper P/L instead of deleting history.
+    hard market-quality, correlation, or portfolio guard explicitly blocks it,
+    or when the current actionable model reverses sides. This keeps legacy paper
+    exposure aligned with current risk policy while preserving realized paper
+    P/L instead of deleting history.
     """
 
     history = _normalize_history(previous)
@@ -47,6 +48,11 @@ def update_paper_history(
     evidence_bearing = [row for row in opportunities if row.get("model_probability") is not None]
     opportunity_by_key = {
         (str(row.get("ticker") or ""), str(row.get("side") or "").lower()): row
+        for row in opportunities
+        if row.get("ticker")
+    }
+    opportunity_by_ticker = {
+        str(row.get("ticker") or ""): row
         for row in opportunities
         if row.get("ticker")
     }
@@ -112,8 +118,8 @@ def update_paper_history(
         ticker = str(pick.get("ticker") or "")
         side = str(pick.get("side") or "yes").lower()
         market = market_by_ticker.get(ticker)
-        opportunity = opportunity_by_key.get((ticker, side))
-        exit_reason = _risk_exit_reason(opportunity)
+        opportunity = opportunity_by_key.get((ticker, side)) or opportunity_by_ticker.get(ticker)
+        exit_reason = _risk_exit_reason(opportunity, current_side=side)
 
         if market is not None:
             current_price = float(market.get("yes_price") if side == "yes" else market.get("no_price") or 0.0)
@@ -169,8 +175,14 @@ def calculate_performance(picks: list[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _risk_exit_reason(opportunity: Mapping[str, Any] | None) -> str:
-    if not isinstance(opportunity, Mapping) or str(opportunity.get("action") or "PASS") != "PASS":
+def _risk_exit_reason(opportunity: Mapping[str, Any] | None, *, current_side: str) -> str:
+    if not isinstance(opportunity, Mapping):
+        return ""
+    action = str(opportunity.get("action") or "PASS")
+    proposed_side = str(opportunity.get("side") or "").lower()
+    if action != "PASS":
+        if proposed_side in {"yes", "no"} and proposed_side != current_side:
+            return f"Model side reversed from {current_side.upper()} to {proposed_side.upper()}."
         return ""
     reasons = opportunity.get("reasons")
     if not isinstance(reasons, (list, tuple)):
