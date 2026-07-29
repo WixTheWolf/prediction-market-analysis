@@ -33,6 +33,7 @@ def score_market(
     signals: Iterable[Signal],
     bankroll_usd: float,
     min_edge: float = 0.04,
+    min_confidence: float = 0.65,
     max_bankroll_fraction: float = 0.02,
     kelly_fraction: float = 0.25,
 ) -> TradeDecision:
@@ -44,6 +45,8 @@ def score_market(
     """
     if bankroll_usd <= 0 or not isfinite(bankroll_usd):
         raise ValueError("bankroll_usd must be a positive finite number")
+    if not 0.0 <= min_edge <= 1.0 or not 0.0 <= min_confidence <= 1.0:
+        raise ValueError("min_edge and min_confidence must be between 0 and 1")
 
     estimated_yes, confidence, reasons = _weighted_probability(signals)
     yes_edge = estimated_yes - market.yes_price
@@ -74,10 +77,15 @@ def score_market(
     maximum_loss = round(bankroll_usd * recommended_fraction, 2)
 
     action = "PASS"
-    if edge >= min_edge and confidence >= 0.55 and maximum_loss > 0:
+    if edge >= min_edge and confidence >= min_confidence and maximum_loss > 0:
         action = "PAPER_BUY"
     if warnings and edge < min_edge + 0.02:
         action = "PASS"
+
+    if edge < min_edge:
+        warnings.append(f"Edge is below the {min_edge:.0%} trade threshold.")
+    if confidence < min_confidence:
+        warnings.append(f"Confidence is below the {min_confidence:.0%} trade threshold.")
 
     return TradeDecision(
         ticker=market.ticker,

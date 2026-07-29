@@ -40,6 +40,8 @@ jobs:
         run: uv python install 3.11
       - name: Install dependencies
         run: uv sync --frozen
+      - name: Set scan timestamp
+        run: echo "GENERATED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
 
       - name: Run broad live market discovery
         env:
@@ -83,7 +85,7 @@ jobs:
             --polymarket-limit 2000 \
             --min-liquidity 5000 \
             --min-volume 10000 \
-            --min-similarity 0.72
+            --min-similarity 0.62
 
       - name: Build evidence-first opportunity report
         run: |
@@ -94,6 +96,23 @@ jobs:
             --bankroll 1000 \
             --top 200
 
+      - name: Recover previously published paper history
+        run: |
+          HISTORY_URL="https://wixthewolf.github.io/prediction-market-analysis/data/history.json?run=${GITHUB_RUN_NUMBER}"
+          if ! curl --fail --silent --show-error --location --retry 2 "$HISTORY_URL" -o output/live/history.previous.json; then
+            printf '{"version":1,"updated_at":"","scans":[],"paper_picks":[],"performance":{}}\n' > output/live/history.previous.json
+          fi
+
+      - name: Update paper ledger and performance history
+        run: |
+          uv run python -m src.agent.paper_history_cli \
+            --previous output/live/history.previous.json \
+            --markets output/live/latest-scan.json \
+            --opportunities output/live/opportunities.json \
+            --output output/live/history.json \
+            --generated-at "$GENERATED_AT" \
+            --build-run "$GITHUB_RUN_NUMBER"
+
       - name: Create run metadata and summary
         env:
           BUILD_SHA: ${{ github.sha }}
@@ -102,20 +121,26 @@ jobs:
           uv run python - <<'PY'
           import json
           import os
-          from datetime import datetime, timezone
           from pathlib import Path
 
           markets = json.loads(Path("output/live/latest-scan.json").read_text(encoding="utf-8"))
           opportunities = json.loads(Path("output/live/opportunities.json").read_text(encoding="utf-8"))
           signals = json.loads(Path("output/live/combined-signals.json").read_text(encoding="utf-8"))
           evidence = json.loads(Path("output/live/evidence-metadata.json").read_text(encoding="utf-8"))
-          generated_at = datetime.now(timezone.utc).isoformat()
+          history = json.loads(Path("output/live/history.json").read_text(encoding="utf-8"))
+          generated_at = os.environ["GENERATED_AT"]
           actionable = [item for item in opportunities if item.get("action") != "PASS"]
+          watch_candidates = [
+              item for item in opportunities
+              if item.get("model_probability") is not None and item.get("action") == "PASS"
+          ]
           categories = sorted({str(item.get("category") or "other") for item in markets})
+          performance = history.get("performance", {})
           metadata = {
               "generated_at": generated_at,
               "market_count": len(markets),
               "opportunity_count": len(actionable),
+              "watch_candidate_count": len(watch_candidates),
               "research_queue_count": len(opportunities) - len(actionable),
               "evidence_signal_count": sum(len(value) for value in signals.values()),
               "evidence_market_count": len(signals),
@@ -123,6 +148,11 @@ jobs:
               "external_market_count": evidence.get("external_markets_loaded", 0),
               "evidence_source_status": evidence.get("source_status", "unknown"),
               "category_count": len(categories),
+              "paper_pick_count": performance.get("total_picks", 0),
+              "open_paper_pick_count": performance.get("open_picks", 0),
+              "resolved_paper_pick_count": performance.get("resolved_picks", 0),
+              "marked_pnl_usd": performance.get("marked_pnl_usd", 0.0),
+              "realized_pnl_usd": performance.get("realized_pnl_usd", 0.0),
               "source": "Kalshi public API + Polymarket Gamma API",
               "mode": "read-only paper research",
               "scanner_status": "healthy" if markets else "degraded",
@@ -138,25 +168,28 @@ jobs:
               f"- Build: `{metadata['build_sha']}` / run **{metadata['build_run']}**",
               f"- Curated Kalshi markets: **{len(markets)}**",
               f"- Polymarket markets loaded: **{metadata['external_market_count']}**",
-              f"- High-confidence cross-venue matches: **{metadata['cross_venue_match_count']}**",
-              f"- Evidence-bearing markets: **{metadata['evidence_market_count']}**",
-              f"- Paper opportunities: **{len(actionable)}**",
+              f"- Cross-venue matches: **{metadata['cross_venue_match_count']}**",
+              f"- Actionable paper plays: **{len(actionable)}**",
+              f"- Watch candidates: **{len(watch_candidates)}**",
+              f"- Open paper picks: **{metadata['open_paper_pick_count']}**",
+              f"- Indicative paper P/L: **${float(metadata['marked_pnl_usd']):,.2f}**",
               "- Mode: **read-only / no order execution**",
               "",
           ]
-          if actionable:
+          ranked = actionable if actionable else watch_candidates
+          if ranked:
               lines.extend([
-                  "| Side | Ticker | Price | Model | Edge | Confidence | Contracts | Est. EV |",
-                  "|---|---|---:|---:|---:|---:|---:|---:|",
+                  "| Status | Side | Ticker | Price | Model | Edge | Confidence | Est. EV |",
+                  "|---|---|---|---:|---:|---:|---:|---:|",
               ])
-              for item in actionable[:10]:
+              for item in ranked[:10]:
+                  status = "TRADE" if item.get("action") != "PASS" else "WATCH"
                   lines.append(
-                      f"| {str(item.get('side', '')).upper()} | `{item.get('ticker', '')}` | "
+                      f"| {status} | {str(item.get('side', '')).upper()} | `{item.get('ticker', '')}` | "
                       f"{float(item.get('market_probability', 0.0)):.1%} | "
                       f"{float(item.get('model_probability', 0.0)):.1%} | "
                       f"{float(item.get('edge', 0.0)):.1%} | "
                       f"{float(item.get('confidence', 0.0)):.1%} | "
-                      f"{int(item.get('contracts', 0))} | "
                       f"${float(item.get('expected_value_usd', 0.0)):,.2f} |"
                   )
           if not markets:
@@ -164,7 +197,7 @@ jobs:
           elif evidence.get("source_status") != "healthy":
               lines.extend(["", f"> Polymarket evidence source degraded: `{evidence.get('source_error', 'unknown error')}`"])
           elif not actionable:
-              lines.extend(["", "> Markets are connected, but no cross-venue divergence cleared the evidence and risk thresholds."])
+              lines.extend(["", "> No trade cleared every gate. The dashboard still publishes ranked WATCH candidates and exact blockers."])
           summary = "\n".join(lines) + "\n"
           Path("output/live/summary.md").write_text(summary, encoding="utf-8")
           with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as handle:
@@ -188,6 +221,7 @@ jobs:
           cp output/live/opportunities.json site/data/opportunities.json
           cp output/live/run-metadata.json site/data/run-metadata.json
           cp output/live/evidence-metadata.json site/data/evidence-metadata.json
+          cp output/live/history.json site/data/history.json
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
