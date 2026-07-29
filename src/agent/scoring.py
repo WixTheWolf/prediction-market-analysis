@@ -46,17 +46,22 @@ def score_market(
     min_confidence: float = 0.65,
     max_bankroll_fraction: float = 0.02,
     kelly_fraction: float = 0.25,
+    min_trade_volume: float = 100.0,
+    max_trade_spread: float = 0.10,
 ) -> TradeDecision:
     """Turn independent forecasts into a conservative paper-trade decision.
 
     Prices and probabilities are expressed from 0 to 1. The method selects the
     side with the larger positive edge, applies fractional Kelly sizing, and
-    caps risk at ``max_bankroll_fraction``. It does not place an order.
+    caps risk at ``max_bankroll_fraction``. Missing rules, extremely low volume,
+    or a spread of 10% or more are hard PASS gates. It does not place an order.
     """
     if bankroll_usd <= 0 or not isfinite(bankroll_usd):
         raise ValueError("bankroll_usd must be a positive finite number")
     if not 0.0 <= min_edge <= 1.0 or not 0.0 <= min_confidence <= 1.0:
         raise ValueError("min_edge and min_confidence must be between 0 and 1")
+    if min_trade_volume < 0 or not 0.0 <= max_trade_spread <= 1.0:
+        raise ValueError("market quality limits are invalid")
 
     estimated_yes, confidence, reasons = _weighted_probability(signals)
     yes_edge = estimated_yes - market.yes_price
@@ -75,19 +80,28 @@ def score_market(
         edge = no_edge
 
     warnings: list[str] = []
-    if market.spread >= 0.05:
+    hard_blockers: list[str] = []
+    if market.spread >= max_trade_spread:
+        hard_blockers.append(f"Spread is {market.spread:.1%}, at or above the {max_trade_spread:.0%} hard limit.")
+    elif market.spread >= 0.05:
         warnings.append("Wide spread may erase the apparent edge.")
-    if market.volume < 10_000:
+
+    if market.volume < min_trade_volume:
+        hard_blockers.append(
+            f"Volume {market.volume:,.0f} is below the {min_trade_volume:,.0f} minimum required for a paper trade."
+        )
+    elif market.volume < 10_000:
         warnings.append("Low volume increases slippage and exit risk.")
+
     if not market.rules_text.strip():
-        warnings.append("Resolution rules have not been reviewed.")
+        hard_blockers.append("Settlement rules are missing and cannot be reviewed.")
 
     raw_fraction = _fractional_kelly(probability, price, kelly_fraction)
     recommended_fraction = min(raw_fraction, max_bankroll_fraction)
     maximum_loss = round(bankroll_usd * recommended_fraction, 2)
 
     action = "PASS"
-    if edge >= min_edge and confidence >= min_confidence and maximum_loss > 0:
+    if not hard_blockers and edge >= min_edge and confidence >= min_confidence and maximum_loss > 0:
         action = "PAPER_BUY"
     if warnings and edge < min_edge + 0.02:
         action = "PASS"
@@ -96,6 +110,11 @@ def score_market(
         warnings.append(f"Edge is below the {min_edge:.0%} trade threshold.")
     if confidence < min_confidence:
         warnings.append(f"Confidence is below the {min_confidence:.0%} trade threshold.")
+    warnings.extend(hard_blockers)
+
+    if action == "PASS":
+        recommended_fraction = 0.0
+        maximum_loss = 0.0
 
     return TradeDecision(
         ticker=market.ticker,
