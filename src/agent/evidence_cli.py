@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -204,7 +205,26 @@ def _load_markets(path: Path) -> list[MarketSnapshot]:
     rows = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(rows, list):
         raise ValueError("market scan must contain a JSON list")
-    return [MarketSnapshot(**row) for row in rows]
+    markets: list[MarketSnapshot] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        normalized = dict(row)
+        normalized["closes_at"] = _parse_datetime(normalized.get("closes_at"))
+        markets.append(MarketSnapshot(**normalized))
+    return markets
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if value is None or isinstance(value, datetime):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _load_signals(path: Path) -> dict[str, list[Signal]]:
