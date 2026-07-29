@@ -3,7 +3,7 @@ name = "prediction-market-data"
 version = "0.1.0"
 description = "Prediction-market data collection, research, and evidence-first opportunity analysis"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.9"
 dependencies = [
     "brokenaxes>=0.6.2",
     "cryptography>=46.0.3",
@@ -36,7 +36,7 @@ pythonpath = ["."]
 markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py39"
 line-length = 120
 exclude = [".venv"]
 
