@@ -1,5 +1,3 @@
-import os
-
 from src.agent.kalshi_trading import DEMO_URL, PRODUCTION_URL, TradingConfig
 
 
