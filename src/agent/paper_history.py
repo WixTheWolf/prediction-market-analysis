@@ -119,7 +119,7 @@ def calculate_performance(picks: list[Mapping[str, Any]]) -> dict[str, Any]:
     """Calculate honest performance metrics from recorded paper picks."""
 
     active = [row for row in picks if str(row.get("status") or "open") in _ACTIVE_STATUSES]
-    resolved = [row for row in picks if row.get("outcome") in {0, 1, False, True}]
+    resolved = [row for row in picks if row.get("outcome") in {0, 1}]
     wins = [row for row in resolved if _pick_won(row)]
     probabilities = [float(row.get("model_probability")) for row in resolved if row.get("model_probability") is not None]
     outcomes = [_side_outcome(row) for row in resolved if row.get("model_probability") is not None]
