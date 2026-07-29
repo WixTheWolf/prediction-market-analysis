@@ -99,7 +99,8 @@ jobs:
             --manifold-limit 4000 \
             --manifold-min-liquidity 500 \
             --manifold-min-volume 1000 \
-            --manifold-min-similarity 0.55
+            --manifold-min-similarity 0.55 \
+            --weather-base-sigma 2.25
 
       - name: Validate evidence contract
         run: |
@@ -118,7 +119,8 @@ jobs:
           print(
               f"Evidence status={evidence.get('source_status')} "
               f"sources={len(evidence['sources'])} "
-              f"matches={evidence.get('cross_venue_matches', 0)} "
+              f"signal_markets={len(signals)} "
+              f"venue_matches={evidence.get('cross_venue_matches', 0)} "
               f"near={evidence.get('near_match_count', 0)}"
           )
           PY
@@ -131,6 +133,36 @@ jobs:
             --output output/live/opportunities.json \
             --bankroll 1000 \
             --top 200
+
+      - name: Validate portfolio safeguards
+        run: |
+          uv run python - <<'PY'
+          import json
+          from pathlib import Path
+
+          markets = json.loads(Path("output/live/latest-scan.json").read_text(encoding="utf-8"))
+          opportunities = json.loads(Path("output/live/opportunities.json").read_text(encoding="utf-8"))
+          market_by_ticker = {item["ticker"]: item for item in markets}
+          actionable = [item for item in opportunities if item.get("action") != "PASS"]
+          total_risk = sum(float(item.get("maximum_loss_usd", 0.0)) for item in actionable)
+          categories = [str(market_by_ticker[item["ticker"]].get("category") or item["ticker"]) for item in actionable]
+
+          if len(actionable) > 5:
+              raise SystemExit(f"Actionable play cap violated: {len(actionable)}")
+          if total_risk > 100.005:
+              raise SystemExit(f"Portfolio risk cap violated: ${total_risk:.2f}")
+          if len(categories) != len(set(categories)):
+              raise SystemExit(f"Correlated category cap violated: {categories}")
+          for item in actionable:
+              market = market_by_ticker[item["ticker"]]
+              if float(market.get("volume", 0.0)) < 100:
+                  raise SystemExit(f"Low-volume trade escaped hard gate: {item['ticker']}")
+              if float(market.get("spread", 0.0)) >= 0.10:
+                  raise SystemExit(f"Wide-spread trade escaped hard gate: {item['ticker']}")
+              if not str(market.get("rules_text") or "").strip():
+                  raise SystemExit(f"Rule-less trade escaped hard gate: {item['ticker']}")
+          print(f"Validated {len(actionable)} paper plays with ${total_risk:.2f} total maximum loss")
+          PY
 
       - name: Recover previously published paper history
         run: |
@@ -173,7 +205,9 @@ jobs:
           categories = sorted({str(item.get("category") or "other") for item in markets})
           performance = history.get("performance", {})
           sources = evidence.get("sources", []) if isinstance(evidence.get("sources"), list) else []
-          healthy_sources = [source for source in sources if source.get("status") == "healthy"]
+          applicable_sources = [source for source in sources if source.get("status") != "not_applicable"]
+          healthy_sources = [source for source in applicable_sources if source.get("status") == "healthy"]
+          total_recommended_risk = sum(float(item.get("maximum_loss_usd", 0.0)) for item in actionable)
           metadata = {
               "generated_at": generated_at,
               "market_count": len(markets),
@@ -185,16 +219,18 @@ jobs:
               "cross_venue_match_count": evidence.get("cross_venue_matches", 0),
               "near_match_count": evidence.get("near_match_count", 0),
               "external_market_count": evidence.get("external_markets_loaded", 0),
+              "source_item_count": evidence.get("source_items_loaded", evidence.get("external_markets_loaded", 0)),
               "evidence_source_status": evidence.get("source_status", "unknown"),
-              "evidence_source_count": len(sources),
+              "evidence_source_count": len(applicable_sources),
               "healthy_evidence_source_count": len(healthy_sources),
+              "recommended_paper_risk_usd": round(total_recommended_risk, 2),
               "category_count": len(categories),
               "paper_pick_count": performance.get("total_picks", 0),
               "open_paper_pick_count": performance.get("open_picks", 0),
               "resolved_paper_pick_count": performance.get("resolved_picks", 0),
               "marked_pnl_usd": performance.get("marked_pnl_usd", 0.0),
               "realized_pnl_usd": performance.get("realized_pnl_usd", 0.0),
-              "source": "Kalshi public API + Polymarket Gamma API + Manifold Public API",
+              "source": "Kalshi public API + Open-Meteo Forecast API + Polymarket Gamma API + Manifold Public API",
               "mode": "read-only paper research",
               "scanner_status": "healthy" if markets else "degraded",
               "build_sha": os.environ.get("BUILD_SHA", "")[:8],
@@ -208,11 +244,13 @@ jobs:
               f"- Generated: `{generated_at}`",
               f"- Build: `{metadata['build_sha']}` / run **{metadata['build_run']}**",
               f"- Curated Kalshi markets: **{len(markets)}**",
-              f"- External markets loaded: **{metadata['external_market_count']}**",
-              f"- Evidence sources healthy: **{len(healthy_sources)}/{len(sources)}**",
-              f"- Accepted equivalent contracts: **{metadata['cross_venue_match_count']}**",
+              f"- Independent signal markets: **{metadata['evidence_market_count']}**",
+              f"- Source items loaded: **{metadata['source_item_count']}**",
+              f"- Evidence sources healthy: **{len(healthy_sources)}/{len(applicable_sources)}**",
+              f"- Venue-equivalent matches: **{metadata['cross_venue_match_count']}**",
               f"- Diagnostic near matches: **{metadata['near_match_count']}**",
               f"- Actionable paper plays: **{len(actionable)}**",
+              f"- Recommended paper risk: **${metadata['recommended_paper_risk_usd']:,.2f}**",
               f"- Watch candidates: **{len(watch_candidates)}**",
               f"- Open paper picks: **{metadata['open_paper_pick_count']}**",
               f"- Indicative paper P/L: **${float(metadata['marked_pnl_usd']):,.2f}**",
@@ -220,14 +258,15 @@ jobs:
               "",
               "### Evidence sources",
               "",
-              "| Source | Status | Markets | Matches | Near matches |",
-              "|---|---|---:|---:|---:|",
+              "| Source | Status | Items | Signals | Venue matches | Near matches |",
+              "|---|---|---:|---:|---:|---:|",
           ]
           for source in sources:
               lines.append(
                   f"| {source.get('name', 'Unknown')} | {source.get('status', 'unknown')} | "
-                  f"{int(source.get('markets_loaded', 0))} | {int(source.get('matches', 0))} | "
-                  f"{int(source.get('near_matches', 0))} |"
+                  f"{int(source.get('markets_loaded', 0))} | "
+                  f"{int(source.get('signals', source.get('matches', 0)))} | "
+                  f"{int(source.get('matches', 0))} | {int(source.get('near_matches', 0))} |"
               )
 
           ranked = actionable if actionable else watch_candidates
@@ -274,6 +313,8 @@ jobs:
           mkdir -p site/data
           touch site/.nojekyll
           cp dashboard/index.html site/index.html
+          cp dashboard/runtime-overrides.js site/runtime-overrides.js
+          sed -i 's#</body>#<script src="runtime-overrides.js"></script>\n</body>#' site/index.html
           cp output/live/latest-scan.json site/data/latest-scan.json
           cp output/live/opportunities.json site/data/opportunities.json
           cp output/live/run-metadata.json site/data/run-metadata.json
