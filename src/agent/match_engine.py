@@ -1,4 +1,4 @@
-"""High-recall, fail-closed matching between Kalshi and Polymarket."""
+"""High-recall, fail-closed matching across independent prediction venues."""
 
 from __future__ import annotations
 
@@ -49,19 +49,22 @@ class NearMatch:
     similarity: float
     rejection: str
     source_url: str
+    source: str = "Polymarket"
 
 
 class PolymarketDiscoveryClient:
-    """Load useful active markets instead of arbitrary first pages."""
+    """Load useful active markets and targeted search results."""
 
     def __init__(self, config: PolymarketConfig, client: httpx.Client | None = None) -> None:
         self.config = config
         self._client = client or httpx.Client(
             base_url=config.base_url,
             timeout=config.timeout_seconds,
-            headers={"User-Agent": "prediction-market-agent/0.3"},
+            headers={"User-Agent": "prediction-market-agent/0.4"},
         )
         self._owns_client = client is None
+        self.targeted_query_count = 0
+        self.targeted_error_count = 0
 
     def close(self) -> None:
         if self._owns_client:
@@ -111,6 +114,78 @@ class PolymarketDiscoveryClient:
             key=lambda market: (market.volume_usd, market.liquidity_usd),
             reverse=True,
         )[: self.config.max_markets]
+
+    def fetch_targeted_markets(
+        self,
+        kalshi_markets: Iterable[MarketSnapshot],
+        *,
+        max_queries: int = 80,
+        limit_per_query: int = 12,
+    ) -> list[ExternalMarket]:
+        """Search Polymarket directly for the highest-value Kalshi contracts.
+
+        Bulk ranking can miss niche but exact equivalents. The public search API
+        is used only for a capped set of liquid Kalshi markets and fails softly
+        per query so one bad response cannot stop the scan.
+        """
+
+        ranked = sorted(kalshi_markets, key=lambda market: market.volume, reverse=True)
+        seen: dict[str, ExternalMarket] = {}
+        seen_queries: set[str] = set()
+        for market in ranked:
+            if self.targeted_query_count >= max(0, max_queries):
+                break
+            query = _search_query(market)
+            if not query or query in seen_queries:
+                continue
+            seen_queries.add(query)
+            self.targeted_query_count += 1
+            try:
+                response = self._client.get(
+                    "/public-search",
+                    params={
+                        "q": query,
+                        "events_status": "active",
+                        "limit_per_type": max(1, min(25, limit_per_query)),
+                        "keep_closed_markets": 0,
+                        "search_tags": "false",
+                        "search_profiles": "false",
+                    },
+                )
+                response.raise_for_status()
+                payload = response.json()
+                if not isinstance(payload, Mapping):
+                    raise ValueError("Polymarket search response must be an object")
+                events = payload.get("events", [])
+                if not isinstance(events, list):
+                    continue
+                for event in events:
+                    if not isinstance(event, Mapping):
+                        continue
+                    event_markets = event.get("markets", [])
+                    if not isinstance(event_markets, list):
+                        continue
+                    for row in event_markets:
+                        if isinstance(row, Mapping):
+                            parsed = parse_polymarket_market(row)
+                            if parsed is not None:
+                                seen[parsed.market_id] = parsed
+            except (httpx.HTTPError, ValueError, TypeError):
+                self.targeted_error_count += 1
+        return list(seen.values())
+
+
+def dedupe_external_markets(markets: Iterable[ExternalMarket]) -> list[ExternalMarket]:
+    seen: dict[tuple[str, str], ExternalMarket] = {}
+    for market in markets:
+        key = (_source_name(market), market.market_id)
+        current = seen.get(key)
+        if current is None or (market.volume_usd, market.liquidity_usd) > (
+            current.volume_usd,
+            current.liquidity_usd,
+        ):
+            seen[key] = market
+    return list(seen.values())
 
 
 def build_recall_signals(
@@ -164,25 +239,26 @@ def build_recall_signals(
                     similarity=round(similarity, 6),
                     rejection=reason,
                     source_url=external.source_url,
+                    source=_source_name(external),
                 )
             )
         if accepted is None:
             continue
 
         external, similarity, variant = accepted
+        source = _source_name(external)
         confidence = _confidence(similarity, external, config)
         signal = Signal(
-            name="Polymarket equivalent-contract price",
+            name=f"{source} equivalent-contract price",
             probability=external.yes_probability,
             confidence=confidence,
             rationale=(
-                f"Equivalent Polymarket contract prices YES at {external.yes_probability:.1%}; "
-                f"semantic match {similarity:.0%}, liquidity ${external.liquidity_usd:,.0f}, "
-                f"volume ${external.volume_usd:,.0f}."
+                f"Equivalent {source} contract prices YES at {external.yes_probability:.1%}; "
+                f"semantic match {similarity:.0%}, {_activity_text(external)}."
             ),
-            weight=1.0,
+            weight=_source_weight(external),
             metadata={
-                "source": "Polymarket",
+                "source": source,
                 "source_url": external.source_url,
                 "external_market_id": external.market_id,
                 "external_question": external.question,
@@ -191,7 +267,7 @@ def build_recall_signals(
                 "retrieved_at": datetime.now(timezone.utc).isoformat(),
             },
         )
-        signals[kalshi.ticker] = [signal]
+        signals.setdefault(kalshi.ticker, []).append(signal)
         matches.append(
             CrossVenueMatch(
                 kalshi_ticker=kalshi.ticker,
@@ -213,6 +289,15 @@ def _kalshi_variants(market: MarketSnapshot) -> list[str]:
         first_sentence = re.split(r"(?<=[?.!])\s+", rules, maxsplit=1)[0][:500]
         variants.extend([first_sentence, f"{title} {first_sentence}"])
     return [variant for variant in dict.fromkeys(variants) if len(variant) >= 8]
+
+
+def _search_query(market: MarketSnapshot) -> str:
+    variants = _kalshi_variants(market)
+    if not variants:
+        return ""
+    best = max(variants, key=lambda value: len(_meaningful_tokens(value)))
+    tokens = [token for token in _canonical(best).split() if token not in _STOPWORDS]
+    return " ".join(tokens[:14])
 
 
 def _canonical(value: str) -> str:
@@ -273,4 +358,26 @@ def _confidence(similarity: float, market: ExternalMarket, config: PolymarketCon
     similarity_component = max(0.0, min(1.0, (similarity - config.min_similarity) / (1.0 - config.min_similarity)))
     liquidity_component = max(0.0, min(1.0, math.log10(max(market.liquidity_usd, 1.0)) / 6.0))
     volume_component = max(0.0, min(1.0, math.log10(max(market.volume_usd, 1.0)) / 7.0))
-    return round(min(0.92, 0.62 + 0.18 * similarity_component + 0.06 * liquidity_component + 0.06 * volume_component), 4)
+    raw = min(0.92, 0.62 + 0.18 * similarity_component + 0.06 * liquidity_component + 0.06 * volume_component)
+    return round(max(0.0, min(0.92, raw * _confidence_multiplier(market))), 4)
+
+
+def _source_name(market: ExternalMarket) -> str:
+    return str(getattr(market, "source_name", "Polymarket"))
+
+
+def _source_weight(market: ExternalMarket) -> float:
+    return max(0.05, min(1.0, float(getattr(market, "source_weight", 1.0))))
+
+
+def _confidence_multiplier(market: ExternalMarket) -> float:
+    return max(0.25, min(1.0, float(getattr(market, "confidence_multiplier", 1.0))))
+
+
+def _activity_text(market: ExternalMarket) -> str:
+    unit = str(getattr(market, "activity_unit", "$"))
+    if unit == "$":
+        return f"liquidity ${market.liquidity_usd:,.0f}, volume ${market.volume_usd:,.0f}"
+    if unit == "M$":
+        return f"liquidity M${market.liquidity_usd:,.0f}, volume M${market.volume_usd:,.0f}"
+    return f"liquidity {market.liquidity_usd:,.0f} {unit}, volume {market.volume_usd:,.0f} {unit}"
