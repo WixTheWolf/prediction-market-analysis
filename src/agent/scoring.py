@@ -1,4 +1,4 @@
-from math import isfinite
+from math import isfinite, sqrt
 from typing import Iterable
 
 from .models import MarketSnapshot, Signal, TradeDecision
@@ -15,8 +15,18 @@ def _weighted_probability(signals: Iterable[Signal]) -> tuple[float, float, list
         raise ValueError("signals must have positive effective weight")
 
     probability = sum(signal.probability * weight for signal, weight in zip(items, effective_weights)) / total_weight
-    confidence = min(1.0, total_weight / max(1.0, sum(signal.weight for signal in items)))
+    base_confidence = min(1.0, total_weight / max(1.0, sum(signal.weight for signal in items)))
+    variance = sum(
+        weight * (signal.probability - probability) ** 2
+        for signal, weight in zip(items, effective_weights)
+    ) / total_weight
+    dispersion = sqrt(max(0.0, variance))
+    agreement_factor = max(0.40, 1.0 - min(0.60, dispersion * 1.8))
+    confidence = min(1.0, base_confidence * agreement_factor)
+
     reasons = [f"{signal.name}: {signal.rationale}" for signal in items]
+    if len(items) > 1:
+        reasons.append(f"Cross-source probability dispersion: {dispersion:.1%}.")
     return probability, confidence, reasons
 
 
