@@ -99,7 +99,7 @@ def assess_market(market: MarketSnapshot) -> MarketQuality:
 
 
 def curate_markets(markets: list[MarketSnapshot], *, include_bundles: bool = False) -> list[MarketSnapshot]:
-    """Return dashboard-worthy markets ranked by quality rather than raw spread alone."""
+    """Return dashboard-worthy markets ranked by research tier and execution quality."""
     assessed = [(market, assess_market(market)) for market in markets]
     filtered = [
         (market, quality)
@@ -111,11 +111,11 @@ def curate_markets(markets: list[MarketSnapshot], *, include_bundles: bool = Fal
         for market, _ in sorted(
             filtered,
             key=lambda item: (
-                item[1].researchable,
-                item[1].score,
-                item[0].volume,
-                item[0].open_interest,
+                not item[1].researchable,
+                item[0].spread,
+                -item[1].score,
+                -item[0].volume,
+                -item[0].open_interest,
             ),
-            reverse=True,
         )
     ]
