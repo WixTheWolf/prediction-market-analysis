@@ -87,9 +87,7 @@ def test_numeric_mismatch_is_rejected() -> None:
 
 
 def test_low_liquidity_market_is_rejected() -> None:
-    external = ExternalMarket(
-        **{**_external().__dict__, "liquidity_usd": 100.0}
-    )
+    external = ExternalMarket(**{**_external().__dict__, "liquidity_usd": 100.0})
     signals, _ = build_cross_venue_signals([_kalshi()], [external])
     assert signals == {}
 
@@ -98,7 +96,7 @@ def test_client_requests_active_open_markets() -> None:
     seen: dict[str, str] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        seen.update({key: value for key, value in request.url.params.multi_items()})
+        seen.update(dict(request.url.params.multi_items()))
         return httpx.Response(200, json=[])
 
     client = httpx.Client(base_url="https://example.test", transport=httpx.MockTransport(handler))
