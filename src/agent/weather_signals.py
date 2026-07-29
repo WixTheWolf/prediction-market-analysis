@@ -186,7 +186,7 @@ def build_weather_signals(
         "markets_loaded": len(station_codes),
         "markets_considered": supported,
         "signals": len(signals),
-        "matches": len(signals),
+        "matches": 0,
         "near_matches": 0,
         "request_count": weather_client.request_count,
         "request_errors": weather_client.error_count,
