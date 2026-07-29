@@ -26,7 +26,7 @@ concurrency:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 15
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -73,11 +73,23 @@ jobs:
           print(f"Publishing {len(markets)} curated markets")
           PY
 
+      - name: Build independent cross-venue evidence
+        run: |
+          uv run python -m src.agent.evidence_cli \
+            --markets output/live/latest-scan.json \
+            --manual-signals config/forecast_signals.json \
+            --output output/live/combined-signals.json \
+            --metadata-output output/live/evidence-metadata.json \
+            --polymarket-limit 2000 \
+            --min-liquidity 5000 \
+            --min-volume 10000 \
+            --min-similarity 0.72
+
       - name: Build evidence-first opportunity report
         run: |
           uv run python -m src.agent.opportunity_cli \
             --markets output/live/latest-scan.json \
-            --signals config/forecast_signals.json \
+            --signals output/live/combined-signals.json \
             --output output/live/opportunities.json \
             --bankroll 1000 \
             --top 200
@@ -95,7 +107,8 @@ jobs:
 
           markets = json.loads(Path("output/live/latest-scan.json").read_text(encoding="utf-8"))
           opportunities = json.loads(Path("output/live/opportunities.json").read_text(encoding="utf-8"))
-          signals = json.loads(Path("config/forecast_signals.json").read_text(encoding="utf-8"))
+          signals = json.loads(Path("output/live/combined-signals.json").read_text(encoding="utf-8"))
+          evidence = json.loads(Path("output/live/evidence-metadata.json").read_text(encoding="utf-8"))
           generated_at = datetime.now(timezone.utc).isoformat()
           actionable = [item for item in opportunities if item.get("action") != "PASS"]
           categories = sorted({str(item.get("category") or "other") for item in markets})
@@ -105,8 +118,12 @@ jobs:
               "opportunity_count": len(actionable),
               "research_queue_count": len(opportunities) - len(actionable),
               "evidence_signal_count": sum(len(value) for value in signals.values()),
+              "evidence_market_count": len(signals),
+              "cross_venue_match_count": evidence.get("cross_venue_matches", 0),
+              "external_market_count": evidence.get("external_markets_loaded", 0),
+              "evidence_source_status": evidence.get("source_status", "unknown"),
               "category_count": len(categories),
-              "source": "Kalshi public API",
+              "source": "Kalshi public API + Polymarket Gamma API",
               "mode": "read-only paper research",
               "scanner_status": "healthy" if markets else "degraded",
               "build_sha": os.environ.get("BUILD_SHA", "")[:8],
@@ -115,35 +132,39 @@ jobs:
           Path("output/live/run-metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
           lines = [
-              "## Live Kalshi scan",
+              "## Live prediction-market scan",
               "",
               f"- Generated: `{generated_at}`",
               f"- Build: `{metadata['build_sha']}` / run **{metadata['build_run']}**",
-              f"- Curated markets: **{len(markets)}**",
-              f"- Categories represented: **{len(categories)}**",
-              f"- Registered evidence signals: **{metadata['evidence_signal_count']}**",
-              f"- Evidence-backed paper opportunities: **{len(actionable)}**",
+              f"- Curated Kalshi markets: **{len(markets)}**",
+              f"- Polymarket markets loaded: **{metadata['external_market_count']}**",
+              f"- High-confidence cross-venue matches: **{metadata['cross_venue_match_count']}**",
+              f"- Evidence-bearing markets: **{metadata['evidence_market_count']}**",
+              f"- Paper opportunities: **{len(actionable)}**",
               "- Mode: **read-only / no order execution**",
               "",
           ]
-          if opportunities:
+          if actionable:
               lines.extend([
-                  "| Action | Ticker | Market | Model | Edge | Confidence | Max loss |",
-                  "|---|---|---:|---:|---:|---:|---:|",
+                  "| Side | Ticker | Price | Model | Edge | Confidence | Contracts | Est. EV |",
+                  "|---|---|---:|---:|---:|---:|---:|---:|",
               ])
-              for item in opportunities[:10]:
-                  model = item.get("model_probability")
-                  model_text = "—" if model is None else f"{float(model):.1%}"
+              for item in actionable[:10]:
                   lines.append(
-                      f"| {item.get('action', 'PASS')} | `{item.get('ticker', '')}` | "
-                      f"{float(item.get('market_probability', 0.0)):.1%} | {model_text} | "
-                      f"{float(item.get('edge', 0.0)):.1%} | {float(item.get('confidence', 0.0)):.1%} | "
-                      f"${float(item.get('maximum_loss_usd', 0.0)):,.2f} |"
+                      f"| {str(item.get('side', '')).upper()} | `{item.get('ticker', '')}` | "
+                      f"{float(item.get('market_probability', 0.0)):.1%} | "
+                      f"{float(item.get('model_probability', 0.0)):.1%} | "
+                      f"{float(item.get('edge', 0.0)):.1%} | "
+                      f"{float(item.get('confidence', 0.0)):.1%} | "
+                      f"{int(item.get('contracts', 0))} | "
+                      f"${float(item.get('expected_value_usd', 0.0)):,.2f} |"
                   )
           if not markets:
-              lines.extend(["", "> Dashboard deployed, but the scanner produced no curated markets. The site will show degraded status instead of remaining stale."])
+              lines.extend(["", "> Dashboard deployed, but the Kalshi scanner produced no curated markets."])
+          elif evidence.get("source_status") != "healthy":
+              lines.extend(["", f"> Polymarket evidence source degraded: `{evidence.get('source_error', 'unknown error')}`"])
           elif not actionable:
-              lines.extend(["", "> Live markets are connected. No trade recommendation is issued without independent evidence."])
+              lines.extend(["", "> Markets are connected, but no cross-venue divergence cleared the evidence and risk thresholds."])
           summary = "\n".join(lines) + "\n"
           Path("output/live/summary.md").write_text(summary, encoding="utf-8")
           with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as handle:
@@ -166,6 +187,7 @@ jobs:
           cp output/live/latest-scan.json site/data/latest-scan.json
           cp output/live/opportunities.json site/data/opportunities.json
           cp output/live/run-metadata.json site/data/run-metadata.json
+          cp output/live/evidence-metadata.json site/data/evidence-metadata.json
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
