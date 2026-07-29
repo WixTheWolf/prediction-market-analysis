@@ -13,6 +13,15 @@ on:
       - "dashboard/**"
       - "pyproject.toml"
       - "uv.lock"
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/live-kalshi-scan.yml"
+      - "src/agent/**"
+      - "config/forecast_signals.json"
+      - "dashboard/**"
+      - "pyproject.toml"
+      - "uv.lock"
 
 permissions:
   contents: read
@@ -20,16 +29,13 @@ permissions:
   id-token: write
 
 concurrency:
-  group: live-kalshi-scan
+  group: live-kalshi-scan-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   scan:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
       - name: Checkout repository
@@ -107,6 +113,8 @@ jobs:
               raise SystemExit("Evidence metadata is missing the sources list")
           if not isinstance(signals, dict):
               raise SystemExit("Combined signals must be a JSON object")
+          if evidence.get("source_status") == "degraded":
+              raise SystemExit(f"All evidence sources degraded: {evidence.get('source_error', 'unknown')}")
           print(
               f"Evidence status={evidence.get('source_status')} "
               f"sources={len(evidence['sources'])} "
@@ -271,6 +279,29 @@ jobs:
           cp output/live/run-metadata.json site/data/run-metadata.json
           cp output/live/evidence-metadata.json site/data/evidence-metadata.json
           cp output/live/history.json site/data/history.json
+
+      - name: Upload dashboard package for deployment
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-site-${{ github.run_number }}
+          path: site/
+          retention-days: 1
+          if-no-files-found: error
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: scan
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Download dashboard package
+        uses: actions/download-artifact@v4
+        with:
+          name: dashboard-site-${{ github.run_number }}
+          path: site
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
