@@ -18,11 +18,12 @@ from .models import MarketSnapshot
 
 @dataclass(frozen=True)
 class ScannerConfig:
-    base_url: str = "https://api.elections.kalshi.com/trade-api/v2"
+    base_url: str = "https://external-api.kalshi.com/trade-api/v2"
     timeout_seconds: float = 15.0
     min_volume: float = 100.0
     max_spread: float = 0.15
     page_size: int = 1_000
+    mve_filter: str = "exclude"
 
 
 class KalshiScanner:
@@ -50,7 +51,11 @@ class KalshiScanner:
     def fetch_markets(self, limit: int = 100, status: str = "open", cursor: Optional[str] = None) -> dict[str, Any]:
         if limit <= 0 or limit > 1_000:
             raise ValueError("limit must be between 1 and 1000")
-        params: dict[str, Any] = {"limit": limit, "status": status}
+        params: dict[str, Any] = {
+            "limit": limit,
+            "status": status,
+            "mve_filter": self.config.mve_filter,
+        }
         if cursor:
             params["cursor"] = cursor
         response = self._client.get("/markets", params=params)
