@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ from .match_engine import (
     dedupe_external_markets,
 )
 from .models import MarketSnapshot, Signal
+from .weather_signals import WeatherConfig, build_weather_signals
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -36,6 +38,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--manifold-min-volume", type=float, default=1_000.0)
     parser.add_argument("--manifold-min-similarity", type=float, default=0.55)
     parser.add_argument("--disable-manifold", action="store_true")
+
+    parser.add_argument("--weather-base-sigma", type=float, default=2.25)
+    parser.add_argument("--disable-weather", action="store_true")
     return parser
 
 
@@ -48,6 +53,17 @@ def main(argv: list[str] | None = None) -> int:
     all_matches = []
     all_near_matches: list[NearMatch] = []
     source_records: list[dict[str, Any]] = []
+
+    if not args.disable_weather:
+        try:
+            weather_signals, weather_metadata = build_weather_signals(
+                markets,
+                config=WeatherConfig(base_sigma_f=max(1.5, args.weather_base_sigma)),
+            )
+            signal_maps.append(weather_signals)
+            source_records.append(weather_metadata)
+        except Exception as exc:  # source boundary; venue evidence still publishes
+            source_records.append(_failed_source("Open-Meteo", "Forecast API", exc))
 
     polymarket_config = PolymarketConfig(
         max_markets=max(1, args.polymarket_limit),
@@ -81,6 +97,7 @@ def main(argv: list[str] | None = None) -> int:
                 "targeted_markets_loaded": len(targeted),
                 "targeted_queries": targeted_queries,
                 "targeted_query_errors": targeted_errors,
+                "signals": len(signals),
                 "matches": len(matches),
                 "near_matches": len(near),
             }
@@ -112,12 +129,13 @@ def main(argv: list[str] | None = None) -> int:
                     "error": "" if external else "Manifold returned zero usable binary markets",
                     "markets_loaded": len(external),
                     "request_errors": request_errors,
+                    "signals": len(signals),
                     "matches": len(matches),
                     "near_matches": len(near),
                     "weighting": "lower-weight play-money crowd forecast",
                 }
             )
-        except Exception as exc:  # source boundary; Polymarket/manual evidence still publishes
+        except Exception as exc:  # source boundary; other evidence still publishes
             source_records.append(_failed_source("Manifold", "Public API", exc))
 
     combined = merge_signal_maps(*signal_maps)
@@ -125,8 +143,9 @@ def main(argv: list[str] | None = None) -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(signal_map_to_json(combined), indent=2), encoding="utf-8")
 
-    healthy_sources = [source for source in source_records if source.get("status") == "healthy"]
-    degraded_sources = [source for source in source_records if source.get("status") != "healthy"]
+    applicable_sources = [source for source in source_records if source.get("status") != "not_applicable"]
+    healthy_sources = [source for source in applicable_sources if source.get("status") == "healthy"]
+    degraded_sources = [source for source in applicable_sources if source.get("status") != "healthy"]
     if healthy_sources and not degraded_sources:
         source_status = "healthy"
     elif healthy_sources:
@@ -140,14 +159,21 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     all_near_matches.sort(key=lambda item: item.similarity, reverse=True)
+    venue_names = {"Polymarket", "Manifold"}
     metadata = {
-        "source": "Polymarket Gamma API + Manifold Public API",
+        "source": "Open-Meteo Forecast API + Polymarket Gamma API + Manifold Public API",
         "source_status": source_status,
         "source_error": source_error,
         "sources": source_records,
-        "discovery_strategy": "ranked bulk slices + targeted search + independent second venue",
+        "discovery_strategy": "category model + ranked bulk slices + targeted venue search",
         "kalshi_markets_considered": len(markets),
-        "external_markets_loaded": sum(int(source.get("markets_loaded", 0)) for source in source_records),
+        "external_markets_loaded": sum(
+            int(source.get("markets_loaded", 0))
+            for source in source_records
+            if source.get("name") in venue_names
+        ),
+        "source_items_loaded": sum(int(source.get("markets_loaded", 0)) for source in source_records),
+        "independent_signal_markets": len(combined),
         "cross_venue_matches": len(all_matches),
         "near_match_count": len(all_near_matches),
         "manual_signal_markets": len(manual),
@@ -181,9 +207,9 @@ def main(argv: list[str] | None = None) -> int:
     metadata_output.parent.mkdir(parents=True, exist_ok=True)
     metadata_output.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     print(
-        f"Built {len(combined)} signal-bearing markets; {len(all_matches)} accepted and "
+        f"Built {len(combined)} signal-bearing markets; {len(all_matches)} venue matches and "
         f"{len(all_near_matches)} diagnostic near matches from "
-        f"{metadata['external_markets_loaded']} external markets"
+        f"{metadata['source_items_loaded']} source items"
     )
     return 0
 
@@ -195,6 +221,7 @@ def _failed_source(name: str, api: str, exc: Exception) -> dict[str, Any]:
         "status": "degraded",
         "error": f"{type(exc).__name__}: {exc}",
         "markets_loaded": 0,
+        "signals": 0,
         "matches": 0,
         "near_matches": 0,
     }
@@ -204,7 +231,26 @@ def _load_markets(path: Path) -> list[MarketSnapshot]:
     rows = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(rows, list):
         raise ValueError("market scan must contain a JSON list")
-    return [MarketSnapshot(**row) for row in rows]
+    markets: list[MarketSnapshot] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        normalized = dict(row)
+        normalized["closes_at"] = _parse_datetime(normalized.get("closes_at"))
+        markets.append(MarketSnapshot(**normalized))
+    return markets
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if value is None or isinstance(value, datetime):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _load_signals(path: Path) -> dict[str, list[Signal]]:

@@ -16,6 +16,13 @@ from typing import Any, Mapping
 _MAX_SCANS = 672  # Seven days at a 15-minute cadence.
 _MAX_PICKS = 500
 _ACTIVE_STATUSES = {"open", "awaiting_resolution"}
+_RISK_EXIT_MARKERS = (
+    "Correlated market group already represented",
+    "Portfolio risk cap reached",
+    "minimum required for a paper trade",
+    "hard limit",
+    "Settlement rules are missing",
+)
 
 
 def update_paper_history(
@@ -26,12 +33,29 @@ def update_paper_history(
     generated_at: str,
     build_run: str = "",
 ) -> dict[str, Any]:
-    """Append one scan, open new paper picks, and update indicative marks."""
+    """Append one scan, open new paper picks, and update indicative marks.
+
+    An existing paper pick is closed at the current displayed price when a new
+    hard market-quality, correlation, or portfolio guard explicitly blocks it,
+    or when the current actionable model reverses sides. This keeps legacy paper
+    exposure aligned with current risk policy while preserving realized paper
+    P/L instead of deleting history.
+    """
 
     history = _normalize_history(previous)
     market_by_ticker = {str(row.get("ticker") or ""): row for row in markets if row.get("ticker")}
     actionable = [row for row in opportunities if str(row.get("action") or "PASS") != "PASS"]
     evidence_bearing = [row for row in opportunities if row.get("model_probability") is not None]
+    opportunity_by_key = {
+        (str(row.get("ticker") or ""), str(row.get("side") or "").lower()): row
+        for row in opportunities
+        if row.get("ticker")
+    }
+    opportunity_by_ticker = {
+        str(row.get("ticker") or ""): row
+        for row in opportunities
+        if row.get("ticker")
+    }
 
     scan_record = {
         "generated_at": generated_at,
@@ -92,15 +116,28 @@ def update_paper_history(
         if status not in _ACTIVE_STATUSES:
             continue
         ticker = str(pick.get("ticker") or "")
+        side = str(pick.get("side") or "yes").lower()
         market = market_by_ticker.get(ticker)
+        opportunity = opportunity_by_key.get((ticker, side)) or opportunity_by_ticker.get(ticker)
+        exit_reason = _risk_exit_reason(opportunity, current_side=side)
+
         if market is not None:
-            side = str(pick.get("side") or "yes").lower()
             current_price = float(market.get("yes_price") if side == "yes" else market.get("no_price") or 0.0)
             entry_price = float(pick.get("entry_price") or 0.0)
             contracts = int(pick.get("contracts") or 0)
+            pnl = round((current_price - entry_price) * contracts, 2)
             pick["current_price"] = current_price
             pick["last_seen_at"] = generated_at
-            pick["marked_pnl_usd"] = round((current_price - entry_price) * contracts, 2)
+
+            if exit_reason:
+                pick["status"] = "closed_by_risk_guard"
+                pick["closed_at"] = generated_at
+                pick["close_reason"] = exit_reason
+                pick["realized_pnl_usd"] = pnl
+                pick["marked_pnl_usd"] = 0.0
+                continue
+
+            pick["marked_pnl_usd"] = pnl
             if status == "awaiting_resolution":
                 pick["status"] = "open"
             continue
@@ -117,7 +154,6 @@ def update_paper_history(
 
 def calculate_performance(picks: list[Mapping[str, Any]]) -> dict[str, Any]:
     """Calculate honest performance metrics from recorded paper picks."""
-
     active = [row for row in picks if str(row.get("status") or "open") in _ACTIVE_STATUSES]
     resolved = [row for row in picks if row.get("outcome") in {0, 1}]
     wins = [row for row in resolved if _pick_won(row)]
@@ -137,6 +173,25 @@ def calculate_performance(picks: list[Mapping[str, Any]]) -> dict[str, Any]:
         "average_entry_edge": round(mean(float(row.get("entry_edge") or 0.0) for row in picks), 6) if picks else None,
         "sample_ready": len(resolved) >= 30,
     }
+
+
+def _risk_exit_reason(opportunity: Mapping[str, Any] | None, *, current_side: str) -> str:
+    if not isinstance(opportunity, Mapping):
+        return ""
+    action = str(opportunity.get("action") or "PASS")
+    proposed_side = str(opportunity.get("side") or "").lower()
+    if action != "PASS":
+        if proposed_side in {"yes", "no"} and proposed_side != current_side:
+            return f"Model side reversed from {current_side.upper()} to {proposed_side.upper()}."
+        return ""
+    reasons = opportunity.get("reasons")
+    if not isinstance(reasons, (list, tuple)):
+        return ""
+    for reason in reasons:
+        text = str(reason)
+        if any(marker in text for marker in _RISK_EXIT_MARKERS):
+            return text
+    return ""
 
 
 def _normalize_history(previous: Mapping[str, Any] | None) -> dict[str, Any]:
