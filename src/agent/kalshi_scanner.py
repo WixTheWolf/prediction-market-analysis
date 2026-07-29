@@ -12,6 +12,7 @@ from typing import Any, Iterable, Mapping, Optional
 
 import httpx
 
+from .market_curation import curate_markets
 from .models import MarketSnapshot
 
 
@@ -117,9 +118,8 @@ def normalize_market(raw: Mapping[str, Any]) -> MarketSnapshot:
 
 
 def rank_markets(markets: Iterable[MarketSnapshot]) -> list[MarketSnapshot]:
-    """Rank liquid, tight-spread markets first for downstream research."""
-
-    return sorted(markets, key=lambda market: (market.spread, -market.volume, -market.open_interest))
+    """Rank readable, researchable markets ahead of opaque bundle contracts."""
+    return curate_markets(list(markets))
 
 
 def _first_price(raw: Mapping[str, Any], *keys: str, default: Optional[float] = None) -> Optional[float]:
@@ -153,7 +153,7 @@ def _spread(*prices: Optional[float]) -> float:
         spreads.append(max(0.0, yes_ask - yes_bid))
     if no_bid is not None and no_ask is not None:
         spreads.append(max(0.0, no_ask - no_bid))
-    return min(spreads) if spreads else 0.0
+    return round(min(spreads), 4) if spreads else 0.0
 
 
 def _parse_datetime(value: Any) -> Optional[datetime]:

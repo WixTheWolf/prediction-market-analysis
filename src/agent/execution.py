@@ -6,10 +6,10 @@ idempotent execution plans that a separately reviewed exchange adapter may use.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
-from typing import Iterable
 
 from .models import TradeDecision
 
@@ -52,7 +52,7 @@ def build_order_plan(
     limit_price: float,
     category: str,
     portfolio: PortfolioState,
-    limits: ExecutionLimits = ExecutionLimits(),
+    limits: ExecutionLimits | None = None,
     live_enabled: bool = False,
     operator_confirmation: bool = False,
     kill_switch_active: bool = False,
@@ -63,6 +63,7 @@ def build_order_plan(
     Re-running the same decision and price yields the same client order ID,
     preventing accidental duplicate submission.
     """
+    limits = limits or ExecutionLimits()
     if not 0.01 <= limit_price <= 0.99:
         raise ValueError("limit_price must be between 0.01 and 0.99")
 

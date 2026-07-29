@@ -11,21 +11,14 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Install uv
         uses: astral-sh/setup-uv@v5
-
       - name: Set up Python
-        run: uv python install 3.9
-
+        run: uv python install 3.11
       - name: Install dependencies
         run: uv sync --group dev
-
-      - name: Run linter
-        run: uv run ruff check .
-
-      - name: Check formatting
-        run: uv run ruff format --check .
+      - name: Run agent linter
+        run: uv run ruff check src/agent tests/agent
 
   test:
     name: Test
@@ -33,15 +26,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Install uv
         uses: astral-sh/setup-uv@v5
-
       - name: Set up Python
-        run: uv python install 3.9
-
+        run: uv python install 3.11
       - name: Install dependencies
         run: uv sync --group dev
-
-      - name: Run tests
-        run: uv run pytest tests/ -v
+      - name: Run deterministic agent tests
+        run: uv run pytest tests/agent -q

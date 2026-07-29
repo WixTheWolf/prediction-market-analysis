@@ -34,29 +34,26 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Install uv
         uses: astral-sh/setup-uv@v5
-
       - name: Install Python
         run: uv python install 3.11
-
       - name: Install dependencies
         run: uv sync --frozen
 
-      - name: Run live public-market scan
+      - name: Run broad live market discovery
         env:
           PYTHONUNBUFFERED: "1"
         run: |
           mkdir -p output/live
           uv run python -m src.agent.cli \
             --limit 1000 \
-            --top 100 \
-            --min-volume 100 \
-            --max-spread 0.15 \
+            --top 150 \
+            --min-volume 10 \
+            --max-spread 0.25 \
             --json > output/live/latest-scan.json
 
-      - name: Require visible market data
+      - name: Require curated market data
         run: |
           uv run python - <<'PY'
           import json
@@ -64,10 +61,8 @@ jobs:
 
           markets = json.loads(Path("output/live/latest-scan.json").read_text(encoding="utf-8"))
           if not markets:
-              raise SystemExit(
-                  "Kalshi returned no displayable markets. Check API schema, endpoint availability, and filters."
-              )
-          print(f"Validated {len(markets)} displayable markets")
+              raise SystemExit("No readable curated markets were produced. Check API schema and curation rules.")
+          print(f"Validated {len(markets)} curated markets")
           PY
 
       - name: Build evidence-first opportunity report
@@ -77,7 +72,7 @@ jobs:
             --signals config/forecast_signals.json \
             --output output/live/opportunities.json \
             --bankroll 1000 \
-            --top 100
+            --top 150
 
       - name: Create run metadata and summary
         run: |
@@ -88,25 +83,30 @@ jobs:
 
           markets = json.loads(Path("output/live/latest-scan.json").read_text(encoding="utf-8"))
           opportunities = json.loads(Path("output/live/opportunities.json").read_text(encoding="utf-8"))
+          signals = json.loads(Path("config/forecast_signals.json").read_text(encoding="utf-8"))
           generated_at = datetime.now(timezone.utc).isoformat()
           actionable = [item for item in opportunities if item.get("action") != "PASS"]
+          categories = sorted({str(item.get("category") or "other") for item in markets})
           metadata = {
               "generated_at": generated_at,
               "market_count": len(markets),
               "opportunity_count": len(actionable),
+              "research_queue_count": len(opportunities) - len(actionable),
+              "evidence_signal_count": sum(len(value) for value in signals.values()),
+              "category_count": len(categories),
               "source": "Kalshi public API",
               "mode": "read-only paper research",
               "scanner_status": "healthy",
           }
-          Path("output/live/run-metadata.json").write_text(
-              json.dumps(metadata, indent=2), encoding="utf-8"
-          )
+          Path("output/live/run-metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
           lines = [
               "## Live Kalshi scan",
               "",
               f"- Generated: `{generated_at}`",
-              f"- Displayable markets: **{len(markets)}**",
+              f"- Curated markets: **{len(markets)}**",
+              f"- Categories represented: **{len(categories)}**",
+              f"- Registered evidence signals: **{metadata['evidence_signal_count']}**",
               f"- Evidence-backed paper opportunities: **{len(actionable)}**",
               "- Mode: **read-only / no order execution**",
               "",
@@ -125,13 +125,11 @@ jobs:
                       f"{float(item.get('edge', 0.0)):.1%} | {float(item.get('confidence', 0.0)):.1%} | "
                       f"${float(item.get('maximum_loss_usd', 0.0)):,.2f} |"
                   )
-
           if not actionable:
               lines.extend([
                   "",
-                  "> Markets are connected and visible. No trade recommendations were issued because no independent forecast signals are registered.",
+                  "> Live markets are connected. No trade recommendation is issued without independent evidence.",
               ])
-
           summary = "\n".join(lines) + "\n"
           Path("output/live/summary.md").write_text(summary, encoding="utf-8")
           with Path(__import__("os").environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as handle:
@@ -156,12 +154,10 @@ jobs:
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
-
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: site
-
       - name: Deploy dashboard to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4

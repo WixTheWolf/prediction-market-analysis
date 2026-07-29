@@ -11,7 +11,6 @@ import logging
 import os
 import signal
 import threading
-import time
 from dataclasses import asdict
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -129,7 +128,7 @@ def run() -> int:
                     state.markets_seen = len(scanned)
                     state.top_markets = serializable[:10]
                 LOGGER.info("scan complete markets=%s ranked=%s", len(scanned), len(ranked))
-            except Exception as exc:  # service boundary: log and retry
+            except Exception as exc:
                 LOGGER.exception("scan failed")
                 with state.lock:
                     state.last_error = f"{type(exc).__name__}: {exc}"

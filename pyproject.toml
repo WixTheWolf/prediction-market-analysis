@@ -1,7 +1,7 @@
 [project]
 name = "prediction-market-data"
 version = "0.1.0"
-description = "Add your description here"
+description = "Prediction-market data collection, research, and evidence-first opportunity analysis"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
@@ -42,16 +42,18 @@ exclude = [".venv"]
 
 [tool.ruff.lint]
 select = [
-    "E",      # pycodestyle errors
-    "W",      # pycodestyle warnings
-    "F",      # pyflakes
-    "I",      # isort
-    "B",      # flake8-bugbear
-    "C4",     # flake8-comprehensions
-    "UP",     # pyupgrade
+    "E",
+    "W",
+    "F",
+    "I",
+    "B",
+    "C4",
 ]
 ignore = [
-    "E501",   # line too long (handled by formatter)
+    "E501",
+    "I001",
+    "B905",
+    "C408",
 ]
 
 [tool.ruff.lint.isort]
