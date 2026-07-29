@@ -24,6 +24,28 @@ from .models import MarketSnapshot, Signal
 _WORD_RE = re.compile(r"[a-z0-9]+")
 _NUMBER_RE = re.compile(r"\b\d+(?:\.\d+)?%?\b")
 _NEGATIONS = {"no", "not", "never", "without", "fail", "fails", "failed", "below", "under"}
+_MONTHS = {
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+}
+_ALIASES = (
+    (re.compile(r"\bfederal reserve\b"), "fed"),
+    (re.compile(r"\binterest rates?\b"), "rates"),
+    (re.compile(r"\bunited states\b"), "us"),
+    (re.compile(r"\bu\.s\.\b"), "us"),
+    (re.compile(r"\bpresidential\b"), "president"),
+    (re.compile(r"\belection day\b"), "election"),
+)
 _STOPWORDS = {
     "a",
     "an",
@@ -121,8 +143,12 @@ class PolymarketClient:
             payload = response.json()
             if not isinstance(payload, list):
                 raise ValueError("Polymarket markets response must be a list")
-            page = [parsed for row in payload if isinstance(row, Mapping) if (parsed := parse_polymarket_market(row))]
-            markets.extend(page)
+            for row in payload:
+                if not isinstance(row, Mapping):
+                    continue
+                parsed = parse_polymarket_market(row)
+                if parsed is not None:
+                    markets.append(parsed)
             if len(payload) < limit:
                 break
             offset += limit
@@ -263,18 +289,31 @@ def signal_map_to_json(signals: Mapping[str, list[Signal]]) -> dict[str, list[di
     }
 
 
+def _canonicalize(value: str) -> str:
+    canonical = value.lower()
+    for pattern, replacement in _ALIASES:
+        canonical = pattern.sub(replacement, canonical)
+    return canonical
+
+
 def _normalized_question(value: str) -> str:
-    words = [word for word in _WORD_RE.findall(value.lower()) if word not in _STOPWORDS]
+    words = [word for word in _WORD_RE.findall(_canonicalize(value)) if word not in _STOPWORDS]
     return " ".join(words)
 
 
 def _semantics_compatible(left: str, right: str) -> bool:
-    left_numbers = set(_NUMBER_RE.findall(left.lower()))
-    right_numbers = set(_NUMBER_RE.findall(right.lower()))
+    left_canonical = _canonicalize(left)
+    right_canonical = _canonicalize(right)
+    left_numbers = set(_NUMBER_RE.findall(left_canonical))
+    right_numbers = set(_NUMBER_RE.findall(right_canonical))
     if left_numbers and right_numbers and left_numbers != right_numbers:
         return False
-    left_tokens = set(_WORD_RE.findall(left.lower()))
-    right_tokens = set(_WORD_RE.findall(right.lower()))
+    left_tokens = set(_WORD_RE.findall(left_canonical))
+    right_tokens = set(_WORD_RE.findall(right_canonical))
+    left_months = left_tokens & _MONTHS
+    right_months = right_tokens & _MONTHS
+    if left_months and right_months and left_months != right_months:
+        return False
     left_negated = bool(left_tokens & _NEGATIONS)
     right_negated = bool(right_tokens & _NEGATIONS)
     return left_negated == right_negated
