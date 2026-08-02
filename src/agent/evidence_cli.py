@@ -17,6 +17,7 @@ from .match_engine import (
     build_recall_signals,
     dedupe_external_markets,
 )
+from .metaculus import MetaculusConfig, MetaculusDiscoveryClient
 from .models import MarketSnapshot, Signal
 from .predictit import PredictItConfig, PredictItDiscoveryClient
 from .weather_signals import WeatherConfig, build_weather_signals
@@ -44,6 +45,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--predictit-limit", type=int, default=2_000)
     parser.add_argument("--predictit-min-similarity", type=float, default=0.60)
     parser.add_argument("--disable-predictit", action="store_true")
+
+    parser.add_argument("--metaculus-limit", type=int, default=1_000)
+    parser.add_argument("--metaculus-min-forecasters", type=float, default=20.0)
+    parser.add_argument("--metaculus-min-similarity", type=float, default=0.58)
+    parser.add_argument("--disable-metaculus", action="store_true")
 
     parser.add_argument("--weather-base-sigma", type=float, default=2.25)
     parser.add_argument("--disable-weather", action="store_true")
@@ -174,6 +180,37 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:  # source boundary; other evidence still publishes
             source_records.append(_failed_source("PredictIt", "Market Data API", exc))
 
+    if not args.disable_metaculus:
+        metaculus_config = MetaculusConfig(
+            max_markets=max(1, args.metaculus_limit),
+            min_volume_usd=max(0.0, args.metaculus_min_forecasters),
+            min_similarity=min(0.99, max(0.45, args.metaculus_min_similarity)),
+        )
+        try:
+            with MetaculusDiscoveryClient(config=metaculus_config) as client:
+                external = client.fetch_active_markets()
+                request_errors = client.request_errors
+            signals, matches, near = build_recall_signals(markets, external, metaculus_config)  # type: ignore[arg-type]
+            signal_maps.append(signals)
+            all_matches.extend(matches)
+            all_near_matches.extend(near)
+            source_records.append(
+                {
+                    "name": "Metaculus",
+                    "api": "Questions API",
+                    "status": "healthy" if external else "degraded",
+                    "error": "" if external else "Metaculus returned zero usable binary questions",
+                    "markets_loaded": len(external),
+                    "request_errors": request_errors,
+                    "signals": len(signals),
+                    "matches": len(matches),
+                    "near_matches": len(near),
+                    "weighting": "calibrated crowd forecast; no tradable price",
+                }
+            )
+        except Exception as exc:  # source boundary; other evidence still publishes
+            source_records.append(_failed_source("Metaculus", "Questions API", exc))
+
     combined = merge_signal_maps(*signal_maps)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -204,9 +241,12 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     all_near_matches.sort(key=lambda item: item.similarity, reverse=True)
-    venue_names = {"Polymarket", "Manifold", "PredictIt"}
+    venue_names = {"Polymarket", "Manifold", "PredictIt", "Metaculus"}
     metadata = {
-        "source": "Open-Meteo Forecast API + Polymarket Gamma API + Manifold Public API + PredictIt Market Data API",
+        "source": (
+            "Open-Meteo Forecast API + Polymarket Gamma API + Manifold Public API "
+            "+ PredictIt Market Data API + Metaculus Questions API"
+        ),
         "source_status": source_status,
         "source_error": source_error,
         "sources": source_records,

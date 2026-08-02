@@ -102,6 +102,9 @@ jobs:
             --manifold-min-similarity 0.55 \
             --predictit-limit 2000 \
             --predictit-min-similarity 0.60 \
+            --metaculus-limit 1000 \
+            --metaculus-min-forecasters 20 \
+            --metaculus-min-similarity 0.58 \
             --weather-base-sigma 2.25 \
             --arbitrage-output output/live/arbitrage.json
 
@@ -183,6 +186,14 @@ jobs:
             --output output/live/history.json \
             --generated-at "$GENERATED_AT" \
             --build-run "$GITHUB_RUN_NUMBER"
+
+      - name: Grade awaiting picks against official Kalshi settlements
+        run: |
+          uv run python -m src.agent.settlement_cli \
+            --history output/live/history.json \
+            --max-lookups 25 \
+            --resolved-at "$GENERATED_AT" \
+            || echo "Settlement grading skipped; picks stay awaiting resolution."
 
       - name: Create run metadata and summary
         env:
