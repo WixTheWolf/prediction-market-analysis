@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .arbitrage import cross_venue_arbitrage, intra_market_arbitrage
 from .cross_venue import PolymarketConfig, merge_signal_maps, signal_map_to_json
 from .manifold import ManifoldConfig, ManifoldDiscoveryClient
 from .match_engine import (
@@ -17,6 +18,7 @@ from .match_engine import (
     dedupe_external_markets,
 )
 from .models import MarketSnapshot, Signal
+from .predictit import PredictItConfig, PredictItDiscoveryClient
 from .weather_signals import WeatherConfig, build_weather_signals
 
 
@@ -39,8 +41,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--manifold-min-similarity", type=float, default=0.55)
     parser.add_argument("--disable-manifold", action="store_true")
 
+    parser.add_argument("--predictit-limit", type=int, default=2_000)
+    parser.add_argument("--predictit-min-similarity", type=float, default=0.60)
+    parser.add_argument("--disable-predictit", action="store_true")
+
     parser.add_argument("--weather-base-sigma", type=float, default=2.25)
     parser.add_argument("--disable-weather", action="store_true")
+
+    parser.add_argument("--arbitrage-output", default="output/live/arbitrage.json")
     return parser
 
 
@@ -138,6 +146,34 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:  # source boundary; other evidence still publishes
             source_records.append(_failed_source("Manifold", "Public API", exc))
 
+    if not args.disable_predictit:
+        predictit_config = PredictItConfig(
+            max_markets=max(1, args.predictit_limit),
+            min_similarity=min(0.99, max(0.45, args.predictit_min_similarity)),
+        )
+        try:
+            with PredictItDiscoveryClient(config=predictit_config) as client:
+                external = client.fetch_active_markets()
+            signals, matches, near = build_recall_signals(markets, external, predictit_config)  # type: ignore[arg-type]
+            signal_maps.append(signals)
+            all_matches.extend(matches)
+            all_near_matches.extend(near)
+            source_records.append(
+                {
+                    "name": "PredictIt",
+                    "api": "Market Data API",
+                    "status": "healthy" if external else "degraded",
+                    "error": "" if external else "PredictIt returned zero usable contracts",
+                    "markets_loaded": len(external),
+                    "signals": len(signals),
+                    "matches": len(matches),
+                    "near_matches": len(near),
+                    "weighting": "real-money political forecasts; excluded from arbitrage legs due to fees",
+                }
+            )
+        except Exception as exc:  # source boundary; other evidence still publishes
+            source_records.append(_failed_source("PredictIt", "Market Data API", exc))
+
     combined = merge_signal_maps(*signal_maps)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -158,10 +194,19 @@ def main(argv: list[str] | None = None) -> int:
         if source.get("error")
     )
 
+    kalshi_by_ticker = {market.ticker: market for market in markets}
+    arbitrage = intra_market_arbitrage(markets) + cross_venue_arbitrage(all_matches, kalshi_by_ticker)
+    arbitrage_output = Path(args.arbitrage_output)
+    arbitrage_output.parent.mkdir(parents=True, exist_ok=True)
+    arbitrage_output.write_text(
+        json.dumps([item.to_dict() for item in arbitrage], indent=2),
+        encoding="utf-8",
+    )
+
     all_near_matches.sort(key=lambda item: item.similarity, reverse=True)
-    venue_names = {"Polymarket", "Manifold"}
+    venue_names = {"Polymarket", "Manifold", "PredictIt"}
     metadata = {
-        "source": "Open-Meteo Forecast API + Polymarket Gamma API + Manifold Public API",
+        "source": "Open-Meteo Forecast API + Polymarket Gamma API + Manifold Public API + PredictIt Market Data API",
         "source_status": source_status,
         "source_error": source_error,
         "sources": source_records,
@@ -176,6 +221,7 @@ def main(argv: list[str] | None = None) -> int:
         "independent_signal_markets": len(combined),
         "cross_venue_matches": len(all_matches),
         "near_match_count": len(all_near_matches),
+        "arbitrage_count": len(arbitrage),
         "manual_signal_markets": len(manual),
         "combined_signal_markets": len(combined),
         "matches": [
@@ -207,9 +253,9 @@ def main(argv: list[str] | None = None) -> int:
     metadata_output.parent.mkdir(parents=True, exist_ok=True)
     metadata_output.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     print(
-        f"Built {len(combined)} signal-bearing markets; {len(all_matches)} venue matches and "
-        f"{len(all_near_matches)} diagnostic near matches from "
-        f"{metadata['source_items_loaded']} source items"
+        f"Built {len(combined)} signal-bearing markets; {len(all_matches)} venue matches, "
+        f"{len(all_near_matches)} diagnostic near matches, and {len(arbitrage)} arbitrage "
+        f"candidates from {metadata['source_items_loaded']} source items"
     )
     return 0
 

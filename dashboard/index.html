@@ -65,18 +65,20 @@ const fmtPct=v=>v==null||!Number.isFinite(Number(v))?'—':`${(Number(v)*100).to
 const fmtUsd=v=>new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(Number(v||0));
 const fmtNum=v=>new Intl.NumberFormat('en-US',{maximumFractionDigits:0}).format(Number(v||0));
 const fmtDate=v=>v?new Date(v).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):'—';
-let markets=[],opportunities=[],rows=[],meta={},evidenceMeta={},history={scans:[],paper_picks:[],performance:{}},currentView='plays',healthState='degraded';
+let markets=[],opportunities=[],rows=[],meta={},evidenceMeta={},history={scans:[],paper_picks:[],performance:{}},arbitrage=[],currentView='plays',healthState='degraded';
 
 async function load(){
   const stamp=Date.now();
-  const urls=['opportunities.json','run-metadata.json','latest-scan.json','evidence-metadata.json','history.json'].map(name=>`data/${name}?t=${stamp}`);
-  const [oppRes,metaRes,marketRes,evidenceRes,historyRes]=await Promise.all(urls.map(url=>fetch(url)));
+  const urls=['opportunities.json','run-metadata.json','latest-scan.json','evidence-metadata.json','history.json','arbitrage.json'].map(name=>`data/${name}?t=${stamp}`);
+  const [oppRes,metaRes,marketRes,evidenceRes,historyRes,arbRes]=await Promise.all(urls.map(url=>fetch(url)));
   if(!marketRes.ok)throw new Error('The published Kalshi scan is unavailable.');
   markets=await marketRes.json();
   opportunities=oppRes.ok?await oppRes.json():[];
   meta=metaRes.ok?await metaRes.json():{};
   evidenceMeta=evidenceRes.ok?await evidenceRes.json():{};
   history=historyRes.ok?await historyRes.json():{scans:[],paper_picks:[],performance:{}};
+  arbitrage=arbRes.ok?await arbRes.json():[];
+  if(!Array.isArray(arbitrage))arbitrage=[];
   if(!Array.isArray(markets)||!Array.isArray(opportunities))throw new Error('Published data has an invalid format.');
   const oppByTicker=new Map(opportunities.map(item=>[item.ticker,item]));
   rows=markets.map(market=>({...market,...(oppByTicker.get(market.ticker)||{action:'PASS',side:'',model_probability:null,edge:0,confidence:0,score:0,contracts:0,maximum_loss_usd:0,expected_value_usd:0,reasons:['No independent forecast matched this contract.'],evidence:[]})}));
@@ -133,7 +135,8 @@ function renderPlays(){
   root.innerHTML='<div class="callout"><strong>No TRADE alert cleared every gate.</strong> These are the strongest independently priced WATCH candidates. Exact blockers are shown on every card.</div>'+data.map((row,index)=>playCard(row,index+1,'WATCH')).join('');
 }
 
-function renderRadar(){const data=filteredRows(matchedRows());document.getElementById('resultCount').textContent=`${data.length} evidence-bearing market${data.length===1?'':'s'}`;const root=document.getElementById('content');if(!data.length){root.innerHTML='<div class="panel empty"><strong>No accepted cross-venue matches found.</strong>Review Near matches for rejected candidates and Sources & health for external coverage.</div>';return;}root.innerHTML=data.map((row,index)=>playCard(row,index+1,row.action==='PASS'?'WATCH':'TRADE')).join('');}
+function renderRadar(){const data=filteredRows(matchedRows());document.getElementById('resultCount').textContent=`${data.length} evidence-bearing market${data.length===1?'':'s'}`;const root=document.getElementById('content');const arbHtml=arbitragePanel();if(!data.length&&!arbHtml){root.innerHTML='<div class="panel empty"><strong>No accepted cross-venue matches found.</strong>Review Near matches for rejected candidates and Sources & health for external coverage.</div>';return;}root.innerHTML=arbHtml+data.map((row,index)=>playCard(row,index+1,row.action==='PASS'?'WATCH':'TRADE')).join('');}
+function arbitragePanel(){if(!arbitrage.length)return '';const rows=arbitrage.slice(0,8).map(item=>`<div class="check"><div><strong>${esc(item.description||'')}</strong><div class="small">${esc((item.legs||[]).map(leg=>`${String(leg.side||'').toUpperCase()} ${leg.ticker}`).join(' + '))}${item.similarity!=null?` · match ${fmtPct(item.similarity)}`:''}${(item.legs||[]).some(leg=>leg.url)?` · <a href="${esc((item.legs.find(leg=>leg.url)||{}).url)}" target="_blank" rel="noopener">open venue ↗</a>`:''}</div></div><span class="badge good">net ${fmtPct(item.net_profit_after_buffer)}</span></div>`).join('');return `<div class="panel" style="margin-bottom:12px"><h3>Structural arbitrage candidates (${arbitrage.length})</h3><div class="small" style="margin-bottom:8px">Opposite sides summing under $1.00 after a conservative fee buffer. A cross-venue box is only real when both venues&#39; resolution rules describe the identical outcome — verify before acting. Quotes may be stale.</div>${rows}</div>`;}
 
 function renderNear(){
   const near=Array.isArray(evidenceMeta.near_matches)?evidenceMeta.near_matches:[];const f=filters();const data=near.filter(item=>{const hay=`${item.ticker} ${item.source} ${item.kalshi_question} ${item.external_question} ${item.rejection}`.toLowerCase();return!f.q||hay.includes(f.q);});

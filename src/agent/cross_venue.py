@@ -83,6 +83,10 @@ class ExternalMarket:
     end_date: datetime | None
     slug: str
     source_url: str
+    # Executable buy costs when the venue publishes an order book. These stay
+    # None for probability-only sources and unlock box-arbitrage detection.
+    yes_ask: float | None = None
+    no_ask: float | None = None
 
 
 @dataclass(frozen=True)
@@ -176,6 +180,8 @@ def parse_polymarket_market(raw: Mapping[str, Any]) -> ExternalMarket | None:
     if len(question) < 8:
         return None
     slug = str(raw.get("slug") or "").strip()
+    best_bid = _book_price(raw.get("bestBid"))
+    best_ask = _book_price(raw.get("bestAsk"))
     return ExternalMarket(
         market_id=str(raw.get("id") or raw.get("conditionId") or slug or question),
         question=question,
@@ -185,7 +191,19 @@ def parse_polymarket_market(raw: Mapping[str, Any]) -> ExternalMarket | None:
         end_date=_parse_datetime(raw.get("endDate") or raw.get("end_date_iso")),
         slug=slug,
         source_url=f"https://polymarket.com/event/{slug}" if slug else "https://polymarket.com",
+        yes_ask=best_ask,
+        no_ask=round(1.0 - best_bid, 4) if best_bid is not None else None,
     )
+
+
+def _book_price(value: Any) -> float | None:
+    try:
+        price = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not 0.0 < price < 1.0:
+        return None
+    return price
 
 
 def build_cross_venue_signals(

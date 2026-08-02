@@ -100,7 +100,10 @@ jobs:
             --manifold-min-liquidity 500 \
             --manifold-min-volume 1000 \
             --manifold-min-similarity 0.55 \
-            --weather-base-sigma 2.25
+            --predictit-limit 2000 \
+            --predictit-min-similarity 0.60 \
+            --weather-base-sigma 2.25 \
+            --arbitrage-output output/live/arbitrage.json
 
       - name: Validate evidence contract
         run: |
@@ -196,6 +199,12 @@ jobs:
           signals = json.loads(Path("output/live/combined-signals.json").read_text(encoding="utf-8"))
           evidence = json.loads(Path("output/live/evidence-metadata.json").read_text(encoding="utf-8"))
           history = json.loads(Path("output/live/history.json").read_text(encoding="utf-8"))
+          try:
+              arbitrage = json.loads(Path("output/live/arbitrage.json").read_text(encoding="utf-8"))
+          except Exception:
+              arbitrage = []
+          if not isinstance(arbitrage, list):
+              arbitrage = []
           generated_at = os.environ["GENERATED_AT"]
           actionable = [item for item in opportunities if item.get("action") != "PASS"]
           watch_candidates = [
@@ -218,6 +227,7 @@ jobs:
               "evidence_market_count": len(signals),
               "cross_venue_match_count": evidence.get("cross_venue_matches", 0),
               "near_match_count": evidence.get("near_match_count", 0),
+              "arbitrage_count": len(arbitrage),
               "external_market_count": evidence.get("external_markets_loaded", 0),
               "source_item_count": evidence.get("source_items_loaded", evidence.get("external_markets_loaded", 0)),
               "evidence_source_status": evidence.get("source_status", "unknown"),
@@ -249,6 +259,7 @@ jobs:
               f"- Evidence sources healthy: **{len(healthy_sources)}/{len(applicable_sources)}**",
               f"- Venue-equivalent matches: **{metadata['cross_venue_match_count']}**",
               f"- Diagnostic near matches: **{metadata['near_match_count']}**",
+              f"- Arbitrage candidates: **{len(arbitrage)}**",
               f"- Actionable paper plays: **{len(actionable)}**",
               f"- Recommended paper risk: **${metadata['recommended_paper_risk_usd']:,.2f}**",
               f"- Watch candidates: **{len(watch_candidates)}**",
@@ -268,6 +279,16 @@ jobs:
                   f"{int(source.get('signals', source.get('matches', 0)))} | "
                   f"{int(source.get('matches', 0))} | {int(source.get('near_matches', 0))} |"
               )
+
+          if arbitrage:
+              lines.extend(["", "### Arbitrage candidates", ""])
+              for item in arbitrage[:5]:
+                  lines.append(
+                      f"- {item.get('description', '')} -> net "
+                      f"{float(item.get('net_profit_after_buffer', 0.0)):.1%} after fee buffer"
+                  )
+              lines.append("")
+              lines.append("> Cross-venue boxes are only real if both venues' resolution rules are identical. Verify before acting.")
 
           ranked = actionable if actionable else watch_candidates
           if ranked:
@@ -320,6 +341,7 @@ jobs:
           cp output/live/run-metadata.json site/data/run-metadata.json
           cp output/live/evidence-metadata.json site/data/evidence-metadata.json
           cp output/live/history.json site/data/history.json
+          cp output/live/arbitrage.json site/data/arbitrage.json
 
       - name: Upload dashboard package for deployment
         uses: actions/upload-artifact@v4

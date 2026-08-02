@@ -376,6 +376,8 @@ def _confidence_multiplier(market: ExternalMarket) -> float:
 
 def _activity_text(market: ExternalMarket) -> str:
     unit = str(getattr(market, "activity_unit", "$"))
+    if unit == "none":
+        return "venue does not publish activity metrics"
     if unit == "$":
         return f"liquidity ${market.liquidity_usd:,.0f}, volume ${market.volume_usd:,.0f}"
     if unit == "M$":
