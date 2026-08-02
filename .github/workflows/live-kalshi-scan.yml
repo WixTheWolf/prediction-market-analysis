@@ -27,6 +27,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  issues: write
 
 concurrency:
   group: live-kalshi-scan-${{ github.event_name }}-${{ github.ref }}
@@ -140,6 +141,14 @@ jobs:
             --bankroll 1000 \
             --top 200
 
+      - name: Verify actionable plays against live order books
+        run: |
+          uv run python -m src.agent.execution_cli \
+            --opportunities output/live/opportunities.json \
+            --max-checks 10 \
+            --slippage 0.02 \
+            || echo "Order-book verification skipped; plays remain unverified."
+
       - name: Validate portfolio safeguards
         run: |
           uv run python - <<'PY'
@@ -176,6 +185,13 @@ jobs:
           if ! curl --fail --silent --show-error --location --retry 2 "$HISTORY_URL" -o output/live/history.previous.json; then
             printf '{"version":1,"updated_at":"","scans":[],"paper_picks":[],"performance":{}}\n' > output/live/history.previous.json
           fi
+          BASE="https://wixthewolf.github.io/prediction-market-analysis/data"
+          for name in opportunities arbitrage; do
+            if ! curl --fail --silent --show-error --location --retry 2 \
+              "${BASE}/${name}.json?run=${GITHUB_RUN_NUMBER}" -o "output/live/${name}.previous.json"; then
+              printf '[]\n' > "output/live/${name}.previous.json"
+            fi
+          done
 
       - name: Update paper ledger and performance history
         run: |
@@ -194,6 +210,45 @@ jobs:
             --max-lookups 25 \
             --resolved-at "$GENERATED_AT" \
             || echo "Settlement grading skipped; picks stay awaiting resolution."
+
+      - name: Build alert body for new signals
+        run: |
+          uv run python -m src.agent.alerts_cli \
+            --opportunities output/live/opportunities.json \
+            --previous-opportunities output/live/opportunities.previous.json \
+            --arbitrage output/live/arbitrage.json \
+            --previous-arbitrage output/live/arbitrage.previous.json \
+            --output output/live/alerts.md \
+            --dashboard-url "https://wixthewolf.github.io/prediction-market-analysis/" \
+            --generated-at "$GENERATED_AT" \
+            || printf '' > output/live/alerts.md
+
+      - name: Post new signals to the rolling alerts issue
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ ! -s output/live/alerts.md ]; then
+            echo "No new signals this scan."
+            exit 0
+          fi
+          set +e
+          ISSUE=$(gh issue list --repo "$GITHUB_REPOSITORY" --label trade-alert --state open \
+            --json number --jq '.[0].number' 2>/dev/null)
+          if [ -z "$ISSUE" ]; then
+            gh label create trade-alert --repo "$GITHUB_REPOSITORY" \
+              --color FF6B7A --description "Automated command-center alerts" 2>/dev/null
+            URL=$(gh issue create --repo "$GITHUB_REPOSITORY" \
+              --title "Command center trade alerts" --label trade-alert \
+              --body "Automated feed of newly surfaced paper plays and arbitrage candidates. Subscribe to this issue for notifications. Paper research only; no orders are placed.")
+            ISSUE="${URL##*/}"
+          fi
+          if [ -n "$ISSUE" ]; then
+            gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file output/live/alerts.md \
+              || echo "Failed to post alert comment; continuing."
+          else
+            echo "Could not find or create the alerts issue; continuing."
+          fi
 
       - name: Create run metadata and summary
         env:
