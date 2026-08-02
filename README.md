@@ -14,6 +14,40 @@ Currently supported features:
 - Trade history collection via API and blockchain
 - Parquet-based storage with automatic progress saving
 - Extensible analysis script framework
+- Live evidence-first command center (below)
+
+## Live Command Center
+
+A scheduled GitHub Actions workflow
+([live-kalshi-scan.yml](.github/workflows/live-kalshi-scan.yml)) scans every
+15 minutes and publishes a decision dashboard to GitHub Pages. Each run:
+
+1. **Scans Kalshi** (read-only, public API) and curates standard binary
+   markets through quality gates.
+2. **Builds independent evidence** from five sources, each behind a failure
+   boundary so one outage never blocks the rest: Polymarket (bulk + targeted
+   search), Manifold, PredictIt, Metaculus, and Open-Meteo weather forecasts,
+   plus any manually registered signals in
+   [config/forecast_signals.json](config/forecast_signals.json).
+3. **Matches equivalent contracts across venues** with a high-recall,
+   fail-closed matcher (numeric terms, months, negation, and expiration must
+   agree) and publishes both accepted matches and rejected near-matches with
+   the exact rejection reason.
+4. **Detects structural arbitrage** — YES+NO under $1 on a single contract,
+   and cross-venue boxes against high-similarity Polymarket matches using
+   executable two-sided quotes — behind conservative fee buffers and always
+   with a resolution-rules caveat.
+5. **Ranks evidence-backed paper plays** under portfolio limits (play cap,
+   risk cap, correlated-category cap). Markets with no independent evidence
+   always PASS; the engine never invents an edge.
+6. **Keeps an honest scorecard**: every TRADE alert becomes a paper pick,
+   marks update on each scan, and awaiting picks are graded against official
+   Kalshi settlement results so win rate, Brier score, and realized paper P/L
+   reflect real outcomes.
+
+Everything is read-only research tooling: no orders are placed, and paper
+sizing uses a $1,000 research bankroll. Prediction-market trading involves
+real risk of loss; nothing here guarantees profit.
 
 ## Installation & Usage
 
